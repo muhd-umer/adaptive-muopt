@@ -1,0 +1,9 @@
+[project]
+name = "adaptive-muopt"
+version = "0.1.0"
+description = "Adaptive multi-user optimization"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "sionna>=2.0.1",
+]
