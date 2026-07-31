@@ -1,4 +1,4 @@
-%TEST_ADA_MAXRESMACMIMO Tests for ada_maxRESMACMIMO
+%TEST_ADA_MAXRESMACMIMO Compare adaptive and canonical maxRESMAC solvers
 
 clear;
 clc;
@@ -6,353 +6,420 @@ rng(42);
 
 tests = struct();
 
-tests(1).name = 'basic mimo';
+tests(1).name = 'siso';
+tests(1).H = reshape([4 1], 1, 2, 1);
+tests(1).Lxu = [1 1];
+tests(1).Etotal = 2;
+tests(1).theta = [1; 1];
+tests(1).cb = 1;
+tests(1).Rnn = 1;
+tests(1).maxOuter = 100;
+tests(1).gapTol = 2e-5;
+
 H = zeros(2, 4, 2);
 H(:, 1:2, 1) = [3.2 2.1; 1.8 2.9];
 H(:, 3:4, 1) = [2.5 3.0; 2.2 1.9];
 H(:, 1:2, 2) = [2.9 2.5; 2.0 3.1];
 H(:, 3:4, 2) = [2.8 2.3; 1.7 2.6];
-tests(1).H = H;
-tests(1).Lxu = [2 2];
-tests(1).Etotal = 10;
-tests(1).theta = [1; 1];
-tests(1).cb = 1;
-tests(1).Nsamp = 1024;
-
-tests(2).name = 'mimo unequal antennas';
-tests(2).H = (randn(3, 5, 2) + 1j * randn(3, 5, 2)) / sqrt(2);
-tests(2).Lxu = [2 3];
-tests(2).Etotal = 8;
-tests(2).theta = [1; 1.5];
+tests(2).name = 'basic mimo';
+tests(2).H = H;
+tests(2).Lxu = [2 2];
+tests(2).Etotal = 10;
+tests(2).theta = [1; 1];
 tests(2).cb = 1;
-tests(2).Nsamp = 1024;
+tests(2).Rnn = eye(2);
+tests(2).maxOuter = 120;
+tests(2).gapTol = 2e-3;
 
-tests(3).name = 'three-user mimo';
-tests(3).H = (randn(3, 6, 2) + 1j * randn(3, 6, 2)) / sqrt(2);
-tests(3).Lxu = [2 2 2];
-tests(3).Etotal = 9;
-tests(3).theta = [1.2; 0.8; 1.6];
+tests(3).name = 'unequal antennas';
+tests(3).H = (randn(3, 5, 2) + 1j * randn(3, 5, 2)) / sqrt(2);
+tests(3).Lxu = [2 3];
+tests(3).Etotal = 8;
+tests(3).theta = [1; 1.5];
 tests(3).cb = 1;
-tests(3).Nsamp = 1024;
+tests(3).Rnn = eye(3);
+tests(3).maxOuter = 120;
+tests(3).gapTol = 5e-3;
 
-tests(4).name = 'stress mimo';
-tests(4).H = (randn(4, 9, 8) + 1j * randn(4, 9, 8)) / sqrt(2);
-tests(4).Lxu = [2 1 2 1 2 1];
-tests(4).Etotal = 18;
-tests(4).theta = [1; 2; 1.5; 0.5; 1.2; 0.8];
+H = zeros(3, 4, 2);
+H(:, :, 1) = [1.2 0.4 0.7 0.2; 0.3 1.1 0.4 0.8; 0.9 0.2 0.6 0.1];
+H(:, :, 2) = [0.7 0.5 1.0 0.3; 0.2 0.9 0.5 0.7; 0.5 0.3 0.8 0.2];
+tests(4).name = 'colored rank deficient';
+tests(4).H = H;
+tests(4).Lxu = [2 2];
+tests(4).Etotal = 5;
+tests(4).theta = [1.4; 0.7];
 tests(4).cb = 1;
-tests(4).Nsamp = 1024;
+tests(4).Rnn = [1.0 0.2 0.1; 0.2 1.4 0.15; 0.1 0.15 0.8];
+tests(4).maxOuter = 120;
+tests(4).gapTol = 5e-3;
+
+H = zeros(2, 2, 2);
+H(:, :, 1) = [1.4 0.3 + 0.2j; 0.1 - 0.1j 0.8];
+H(:, :, 2) = [0.9 - 0.2j 0.4; 0.2 1.2 + 0.1j];
+tests(5).name = 'single user mimo';
+tests(5).H = H;
+tests(5).Lxu = 2;
+tests(5).Etotal = 4;
+tests(5).theta = 1.2;
+tests(5).cb = 1;
+tests(5).Rnn = eye(2);
+tests(5).maxOuter = 100;
+tests(5).gapTol = 2e-3;
+
+tests(6).name = 'stress';
+tests(6).H = (randn(4, 9, 64) + 1j * randn(4, 9, 64)) / sqrt(2);
+tests(6).Lxu = [2 1 2 1 2 1];
+tests(6).Etotal = 30;
+tests(6).theta = [1; 2; 1.5; 0.5; 1.2; 0.8];
+tests(6).cb = 1;
+tests(6).Rnn = eye(4);
+tests(6).maxOuter = 100;
+tests(6).gapTol = 1e-2;
 
 fprintf('[adaptive maxresmac mimo]\n\n');
-
-results = [];
+results = repmat(empty_result(), numel(tests), 1);
 
 for t = 1:numel(tests)
-    result = run_adaptive_test(tests(t), t);
-    results = [results; result];
+    results(t) = run_test(tests(t), t);
     fprintf('\n');
 end
 
-fprintf('[summary]\n');
-fprintf('%-22s | %10s %10s | %10s %10s | %8s %8s | %9s %9s\n', ...
-    'test', 'rate[canon]', 'rate[ada]', 'energy[c]', 'energy[a]', 'ms[c]', 'ms[a]', 'rel gap', 'prac gap');
-fprintf('%s\n', repmat('-', 1, 114));
+singlePassPassed = run_single_pass_test();
+zeroEnergyPassed = run_zero_energy_test();
+contractPassed = run_contract_test();
+fprintf('\n');
 
-all_passed = true;
+fprintf('[summary]\n');
+fprintf('%-24s | %11s %11s | %10s | %10s %10s\n', ...
+    'test', 'rate[canon]', 'rate[ada]', 'rel gap', 'ms[canon]', 'ms[ada]');
+fprintf('%s\n', repmat('-', 1, 90));
 
 for t = 1:numel(results)
-    r = results(t);
-    all_passed = all_passed && r.passed;
-    fprintf('%-22s | %10.5f %10.5f | %10.5f %10.5f | %8.2f %8.2f | %9.2e %9.2e\n', ...
-        r.name, r.canonical_weighted_rate, r.adaptive_weighted_rate, ...
-        r.canonical_energy, r.adaptive_energy, r.canonical_elapsed_ms, r.adaptive_elapsed_ms, ...
-        r.relative_gap, r.practical_gap);
+    result = results(t);
+    fprintf('%-24s | %11.5f %11.5f | %10.2e | %10.2f %10.2f\n', ...
+        result.name, result.canonicalObjective, result.adaptiveObjective, ...
+        result.relativeGap, result.canonicalMs, result.adaptiveMs);
 end
 
-% [subband grouping] solve on a coarser frequency grid (one design per subband,
-% applied to all its tones) to cut feedback and the tones that must be probed
-fprintf('\n[subband grouping]\n');
-fprintf('%-12s | %11s %11s %10s | %8s\n', 'grid', 'rate[canon]', 'rate[ada]', 'rel gap', 'designs');
-fprintf('%s\n', repmat('-', 1, 62));
+if ~all([results.passed]) || ~singlePassPassed || ...
+        ~zeroEnergyPassed || ~contractPassed
+    error('one or more adaptive maxRESMACMIMO tests failed');
+end
 
-sb_tc = tests(4);
-sb_theta = sb_tc.theta(:);
-N_full = size(sb_tc.H, 3);
+function passed = run_single_pass_test()
+    calls = 0;
+    H = [1.5 0.2 + 0.1j; 0.1 - 0.2j 0.7];
+    pilot = struct('numRx', 2, 'numTones', 1, ...
+        'sample', @sample);
+    opts = struct('R0', eye(2), 'numPilots', 32, 'singlePass', true, ...
+        'stepInitial', 0.05, 'floorInitial', 1e-6, 'rngSeed', 91);
+    initial = oracle_weighted_rate(H, eye(2), 2, 1, 1);
+    [R, E, ~, b, info] = ada_maxRESMACMIMO(pilot, 2, 2, 1, 1, opts);
+    updated = oracle_weighted_rate(H, R, 2, 1, 1);
+    observedError = norm(info.observedR{1} - eye(2), 'fro');
+    passed = calls == 1 && info.pilotCalls == 1 && ...
+        info.iterations == 1 && abs(sum(E, 'all') - 2) <= 1e-10 && ...
+        check_psd(R) && updated >= initial - 1e-10 && ...
+        observedError <= 1e-10 && all(isfinite(b(:)));
+    fprintf('[test] causal single pass: calls=%d, rate %.6f -> %.6f [%s]\n', ...
+        calls, initial, updated, pass_label(passed));
 
-for Nsb = [N_full, 4, 2]
-    Hred = group_subbands_ref(sb_tc.H, Nsb);
-    [~, ~, ~, bc_sb] = maxRESMACMIMO(Hred, sb_tc.Lxu, sb_tc.Etotal, sb_tc.theta, sb_tc.cb, false);
-
-    opts_sb = struct('Nsamp', sb_tc.Nsamp, 'maxOuter', 60, 'rngSeed', 2000, 'verbose', false);
-
-    if Nsb < N_full
-        opts_sb.subbands = Nsb;
+    function Y = sample(~, Atx, X)
+        calls = calls + 1;
+        Y = exact_pilot_samples(H, eye(size(H, 1)), Atx, X);
     end
+end
 
-    [Rada_sb, ~, ~, ~] = ada_maxRESMACMIMO(sb_tc.H, sb_tc.Lxu, sb_tc.Etotal, sb_tc.theta, sb_tc.cb, opts_sb);
+function passed = run_zero_energy_test()
+    pilot = struct('numRx', 2, 'numTones', 1, ...
+        'sample', @(n, Atx, X) zero_energy_samples(n, Atx, X));
+    opts = struct('numPilots', 16, 'singlePass', true, 'rngSeed', 92);
+    [R, E, w, b, info] = ada_maxRESMACMIMO(pilot, 2, 0, 1, 1, opts);
+    passed = sum(E, 'all') == 0 && all(R(:) == 0) && w == 0 && ...
+        all(b(:) == 0) && info.objective == 0 && info.pilotCalls == 1;
+    fprintf('[test] zero-energy single pass [%s]\n', pass_label(passed));
+end
 
-    rc_sb = sb_theta.' * sum(bc_sb, 2);
-    ra_sb = true_weighted_rate(Hred, Rada_sb, sb_tc.Lxu, sb_theta, sb_tc.cb);
-    gap_sb = abs(ra_sb - rc_sb) / max(1, abs(rc_sb));
-    n_designs = numel(sb_tc.Lxu) * Nsb;
+function passed = run_contract_test()
+    source = fileread(which('ada_maxRESMACMIMO'));
+    forbidden = {'\<H\>', '\<Rnn\>', '\<mu_mac\>', '\<maxRESMACMIMO\s*\('};
+    passed = contains(source, 'pilot.sample') && ...
+        all(cellfun(@(pattern) isempty(regexp(source, pattern, 'once')), forbidden));
+    fprintf('[test] non-cheating source contract [%s]\n', pass_label(passed));
+end
 
-    if Nsb == N_full
-        label = sprintf('%d (full)', Nsb);
+function Y = zero_energy_samples(~, ~, X)
+    Y = zeros(2, size(X, 2));
+end
+
+function label = pass_label(passed)
+    if passed
+        label = 'p';
     else
-        label = sprintf('%d subbands', Nsb);
+        label = 'x';
+    end
+end
+
+function result = run_test(tc, seedOffset)
+    fprintf('[test] %s\n', tc.name);
+    Lnoise = chol(tc.Rnn, 'lower');
+    Hwhite = tc.H;
+
+    for n = 1:size(tc.H, 3)
+        Hwhite(:, :, n) = Lnoise \ tc.H(:, :, n);
     end
 
-    fprintf('%-12s | %11.5f %11.5f %10.2e | %8d\n', label, rc_sb, ra_sb, gap_sb, n_designs);
-end
+    pilot = struct();
+    pilot.numRx = size(tc.H, 1);
+    pilot.numTones = size(tc.H, 3);
+    pilot.sample = @(n, Atx, X) exact_pilot_samples( ...
+        tc.H(:, :, n), Lnoise, Atx, X);
+    opts = struct();
+    opts.maxOuter = tc.maxOuter;
+    opts.numPilots = max(64, 8 * (sum(tc.Lxu) + pilot.numRx));
+    opts.rngSeed = 700 + seedOffset;
+    opts.tolObjective = 1e-8;
+    opts.tolCovariance = 1e-7;
+    opts.patience = 4;
 
-if ~all_passed
-    error('one or more adaptive maxRESMAC MIMO tests failed');
-end
+    tic;
+    [~, Ecanonical, wcanonical, bcanonical] = maxRESMACMIMO( ...
+        Hwhite, tc.Lxu, tc.Etotal, tc.theta, tc.cb, false);
+    canonicalMs = toc * 1000;
+    tic;
+    [Radaptive, Eadaptive, wadaptive, badaptive, info] = ada_maxRESMACMIMO( ...
+        pilot, tc.Lxu, tc.Etotal, tc.theta, tc.cb, opts);
+    adaptiveMs = toc * 1000;
 
-function Hsb = group_subbands_ref(H, Nsb)
-    % mirror of the solver's internal grouping so the canonical comparison sees
-    % the same representative tones
-    N = size(H, 3);
-    edges = round(linspace(0, N, Nsb + 1));
-    Hsb = zeros(size(H, 1), size(H, 2), Nsb);
+    canonicalObjective = tc.theta(:)' * sum(bcanonical, 2);
+    adaptiveObjective = oracle_weighted_rate( ...
+        Hwhite, Radaptive, tc.Lxu, tc.theta, tc.cb);
+    learnedObjective = tc.theta(:)' * sum(badaptive, 2);
+    relativeGap = abs(adaptiveObjective - canonicalObjective) / ...
+        max(1, abs(canonicalObjective));
+    learnedGap = abs(learnedObjective - adaptiveObjective) / ...
+        max(1, abs(adaptiveObjective));
+    energyError = abs(sum(Eadaptive, 'all') - tc.Etotal) / max(tc.Etotal, 1);
+    closureError = learned_closure_error(info);
+    [dualResidual, complementarityResidual] = oracle_kkt_residual( ...
+        Hwhite, Radaptive, tc.Lxu, tc.theta, tc.cb);
+    passed = relativeGap <= tc.gapTol && learnedGap <= 1e-8 && ...
+        energyError <= 1e-10 && closureError <= 1e-10 && ...
+        dualResidual <= 2e-2 && complementarityResidual <= 2e-2 && ...
+        check_psd(Radaptive);
 
-    for s = 1:Nsb
-        idx = (edges(s) + 1):edges(s + 1);
-        Hsb(:, :, s) = H(:, :, idx(ceil(numel(idx) / 2)));
+    fprintf('  canonical/adaptive objective: %.8f / %.8f\n', ...
+        canonicalObjective, adaptiveObjective);
+    fprintf('  relative objective gap:       %.3e\n', relativeGap);
+    fprintf('  learned-rate gap:             %.3e\n', learnedGap);
+    fprintf('  canonical/adaptive energy:    %.8f / %.8f\n', ...
+        sum(Ecanonical, 'all'), sum(Eadaptive, 'all'));
+    fprintf('  canonical/adaptive w:         %.6g / %.6g\n', ...
+        wcanonical(1), wadaptive(1));
+    fprintf('  G/S0 closure error:           %.3e\n', closureError);
+    fprintf('  KKT dual/complementarity:     %.3e / %.3e\n', ...
+        dualResidual, complementarityResidual);
+    fprintf('  canonical/adaptive time:      %.2f / %.2f ms\n', ...
+        canonicalMs, adaptiveMs);
+    fprintf('  iterations/pilot calls:       %d / %d\n', ...
+        info.iterations, info.pilotCalls);
+
+    if passed
+        fprintf('  [p] test passed\n');
+    else
+        fprintf('  [x] test failed\n');
     end
 
+    result = empty_result();
+    result.name = tc.name;
+    result.canonicalObjective = canonicalObjective;
+    result.adaptiveObjective = adaptiveObjective;
+    result.relativeGap = relativeGap;
+    result.canonicalMs = canonicalMs;
+    result.adaptiveMs = adaptiveMs;
+    result.passed = passed;
 end
 
-function [wr, b] = true_weighted_rate(H, Rxx, Lxu, theta, cb)
-    % weighted sum rate a covariance design achieves on the true channel, using
-    % the SIC order (descending theta) and whitened cumulative log-dets. Uses H
-    % for validation only, not in the learner
-    [Ly, ~, N] = size(H);
+function result = empty_result()
+    result = struct('name', '', 'canonicalObjective', 0, ...
+        'adaptiveObjective', 0, 'relativeGap', inf, ...
+        'canonicalMs', 0, 'adaptiveMs', 0, 'passed', false);
+end
+
+function Y = exact_pilot_samples(channel, noiseFactor, Atx, X)
+    count = size(X, 2);
+    Ly = size(channel, 1);
+    indices = 0:count - 1;
+    seed = (1:Ly)';
+    Z = exp(2j * pi * seed * indices / count);
+    Z = Z - (Z * X') * X / count;
+    covariance = (Z * Z') / count;
+    covariance = 0.5 * (covariance + covariance');
+    factor = chol(covariance, 'lower');
+    Z = factor \ Z;
+    Y = channel * Atx * X + noiseFactor * Z;
+end
+
+function objective = oracle_weighted_rate(H, Rxx, Lxu, theta, cb)
     theta = theta(:);
     U = numel(theta);
-
-    if isscalar(Lxu)
-        Lxu = ones(1, U) * Lxu;
-    end
-
-    idx_end = cumsum(Lxu);
-    idx_start = [1, idx_end(1:end - 1) + 1];
+    N = size(H, 3);
+    ranges = user_ranges(Lxu, U);
     [~, order] = sort(theta, 'descend');
-    is_cell = iscell(Rxx);
-    b = zeros(U, N);
+    R = covariance_cells(Rxx, Lxu, U, N);
+    rates = zeros(U, N);
 
     for n = 1:N
-        Sprev = eye(Ly);
+        Sprevious = eye(size(H, 1));
 
         for k = 1:U
             u = order(k);
-            cols = idx_start(u):idx_end(u);
-            Hu = H(:, cols, n);
-
-            if is_cell
-                Ru = Rxx{u, n};
-            else
-                Ru = Rxx(1:Lxu(u), 1:Lxu(u), u, n);
-            end
-
-            HRH = 0.5 * (Hu * Ru * Hu' + (Hu * Ru * Hu')');
-            Scur = 0.5 * (Sprev + HRH + (Sprev + HRH)');
-            b(u, n) = (logdet_psd(Scur) - logdet_psd(Sprev)) / (log(2) * cb);
-            Sprev = Scur;
+            Hu = H(:, ranges{u}, n);
+            Scurrent = Sprevious + Hu * R{u, n} * Hu';
+            rates(u, n) = (logdet_spd(Scurrent) - logdet_spd(Sprevious)) / ...
+                (cb * log(2));
+            Sprevious = Scurrent;
         end
-
     end
 
-    wr = theta.' * sum(b, 2);
+    objective = theta' * sum(rates, 2);
 end
 
-function v = logdet_psd(M)
-    M = 0.5 * (M + M');
-    [L, p] = chol(M);
+function error = learned_closure_error(info)
+    numerator = 0;
+    denominator = 0;
 
-    if p == 0
-        v = 2 * sum(log(diag(L)));
-    else
-        v = sum(log(max(real(eig(M)), 1e-15)));
+    for n = 1:numel(info.J)
+        reconstructed = info.G{n}' * diag(info.S0{n}) * info.G{n};
+        numerator = numerator + norm(info.J{n} - reconstructed, 'fro') ^ 2;
+        denominator = denominator + norm(info.J{n}, 'fro') ^ 2;
     end
 
+    error = sqrt(numerator / max(denominator, realmin));
 end
 
-function result = run_adaptive_test(tc, seed_offset)
-    fprintf('[test] %s\n', tc.name);
+function [dualResidual, complementarityResidual] = oracle_kkt_residual( ...
+        H, Rxx, Lxu, theta, cb)
+    theta = theta(:);
+    U = numel(theta);
+    N = size(H, 3);
+    ranges = user_ranges(Lxu, U);
+    R = covariance_cells(Rxx, Lxu, U, N);
+    [stheta, order] = sort(theta, 'descend');
+    delta = stheta - [stheta(2:end); 0];
+    gradient = cell(U, N);
 
-    opts = struct();
-    opts.Nsamp = tc.Nsamp;
-    opts.maxOuter = 60;
-    opts.rngSeed = 1000 + seed_offset;
-    opts.verbose = false;
+    for n = 1:N
+        inverses = cell(U, 1);
+        S = eye(size(H, 1));
 
-    tic;
-    [Rcanon, Ecanon, wcanon, bcanon] = maxRESMACMIMO(tc.H, tc.Lxu, tc.Etotal, tc.theta, tc.cb, false);
-    tcanon = toc;
+        for k = 1:U
+            u = order(k);
+            Hu = H(:, ranges{u}, n);
+            S = S + Hu * R{u, n} * Hu';
+            inverses{k} = S \ eye(size(S));
+        end
 
-    tic;
-    [Rada, Eada, wada, bada, info] = ada_maxRESMACMIMO(tc.H, tc.Lxu, tc.Etotal, tc.theta, tc.cb, opts);
-    tada = toc;
+        tail = zeros(size(S));
 
-    % [practical path] deployable blind surrogate optimizer: batched fresh-noise
-    % probes of the rate oracle, a noise-averaging quadratic surrogate fit, and an
-    % analytic trust-region step (no common random numbers, no channel formed)
-    opts_prac = opts;
-    opts_prac.mode = 'practical';
-    [Rprac, ~, ~, ~, infoprac] = ada_maxRESMACMIMO(tc.H, tc.Lxu, tc.Etotal, tc.theta, tc.cb, opts_prac);
-
-    theta = tc.theta(:);
-    canonical_weighted_rate = theta.' * sum(bcanon, 2);
-
-    [adaptive_weighted_rate, bada_true] = true_weighted_rate(tc.H, Rada, tc.Lxu, theta, tc.cb);
-    practical_rate = true_weighted_rate(tc.H, Rprac, tc.Lxu, theta, tc.cb);
-    oracle_weighted_rate = theta.' * sum(bada, 2);
-    relative_gap = abs(adaptive_weighted_rate - canonical_weighted_rate) / max(1, abs(canonical_weighted_rate));
-    practical_gap = abs(practical_rate - canonical_weighted_rate) / max(1, abs(canonical_weighted_rate));
-    energy_err = abs(sum(Eada, 'all') - tc.Etotal) / max(tc.Etotal, 1e-12);
-    per_user_err = norm(sum(bada_true, 2) - sum(bcanon, 2)) / max(1, norm(sum(bcanon, 2)));
-    spectrum_err = covariance_spectrum_error(Rada, Rcanon);
-    w_err = norm(wada - wcanon) / max(1, norm(wcanon));
-
-    result = struct();
-    result.name = tc.name;
-    result.canonical_weighted_rate = canonical_weighted_rate;
-    result.adaptive_weighted_rate = adaptive_weighted_rate;
-    result.canonical_energy = sum(Ecanon, 'all');
-    result.adaptive_energy = sum(Eada, 'all');
-    result.canonical_elapsed_ms = tcanon * 1000;
-    result.adaptive_elapsed_ms = tada * 1000;
-    result.relative_gap = relative_gap;
-    result.practical_gap = practical_gap;
-    result.practical_iters = infoprac.iters;
-    result.practical_probes = infoprac.probes;
-    result.practical_rounds = infoprac.probeRounds;
-    result.energy_err = energy_err;
-    result.per_user_err = per_user_err;
-    result.spectrum_err = spectrum_err;
-    result.w_err = w_err;
-    result.passed = true;
-
-    fprintf('  canonical per-user rates: [%s]\n', num2str(sum(bcanon, 2)'));
-    fprintf('  adaptive per-user rates:  [%s]\n', num2str(sum(bada_true, 2)'));
-    fprintf('  canonical weighted rate: %.8f\n', canonical_weighted_rate);
-    fprintf('  adaptive weighted rate:  %.8f  (oracle-measured %.6f)\n', adaptive_weighted_rate, oracle_weighted_rate);
-    fprintf('  relative weighted gap:   %.3e\n', relative_gap);
-    fprintf('  practical-mode gap:      %.3e  (rate %.6f)\n', practical_gap, practical_rate);
-    fprintf('  practical probes/rounds: %d / %d (%d pilots each, fresh noise)\n', ...
-        infoprac.probes, infoprac.probeRounds, infoprac.probePilots);
-    fprintf('  per-user rate error:     %.3e\n', per_user_err);
-    fprintf('  covariance spectrum err: %.3e\n', spectrum_err);
-    fprintf('  w relative error:        %.3e\n', w_err);
-    fprintf('  adaptive energy used:    %.8f\n', sum(Eada, 'all'));
-    fprintf('  canonical/adaptive ms:   %.2f / %.2f\n', result.canonical_elapsed_ms, result.adaptive_elapsed_ms);
-    fprintf('  adaptive mode/iters:     %s / %d\n', info.mode, info.iters);
-
-    if relative_gap > 1e-2
-        fprintf('  [x] weighted rate mismatch\n');
-        result.passed = false;
+        for k = U:-1:1
+            tail = tail + delta(k) * inverses{k};
+            u = order(k);
+            Hu = H(:, ranges{u}, n);
+            gradient{u, n} = Hu' * tail * Hu / (cb * log(2));
+            gradient{u, n} = 0.5 * (gradient{u, n} + gradient{u, n}');
+        end
     end
 
-    if practical_gap > 5e-2
-        fprintf('  [x] practical (blind) gap too large\n');
-        result.passed = false;
+    marginalParts = cell(numel(R), 1);
+
+    for i = 1:numel(R)
+        [V, D] = eig(0.5 * (R{i} + R{i}'));
+        active = real(diag(D)) > 1e-7 * max(1, real(trace(R{i})));
+
+        if any(active)
+            marginalParts{i} = real(diag( ...
+                V(:, active)' * gradient{i} * V(:, active)));
+        end
     end
 
-    if per_user_err > 1.1e-1
-        fprintf('  [x] per-user rate mismatch\n');
-        result.passed = false;
+    activeMarginals = vertcat(marginalParts{:});
+    lambda = median(activeMarginals);
+    dualResidual = 0;
+    complementarityResidual = 0;
+
+    for i = 1:numel(R)
+        slack = lambda * eye(size(R{i})) - gradient{i};
+        slack = 0.5 * (slack + slack');
+        dualResidual = max(dualResidual, max(0, -min(real(eig(slack)))));
+        complementarityResidual = max( ...
+            complementarityResidual, norm(slack * R{i}, 'fro'));
     end
 
-    if spectrum_err > 1e-1
-        fprintf('  [x] covariance spectra mismatch\n');
-        result.passed = false;
-    end
-
-    if energy_err > 1e-8
-        fprintf('  [x] adaptive energy constraint mismatch\n');
-        result.passed = false;
-    end
-
-    if ~check_psd(Rada)
-        fprintf('  [x] adaptive covariance is not PSD\n');
-        result.passed = false;
-    end
-
-    if result.passed
-        fprintf('  [p] test passed\n');
-    end
-
+    dualResidual = dualResidual / max(1, abs(lambda));
+    complementarityResidual = complementarityResidual / max(1, abs(lambda));
 end
 
-function err = covariance_spectrum_error(Ra, Rc)
-    vals_a = [];
-    vals_c = [];
-
-    if iscell(Ra)
-
-        for u = 1:size(Ra, 1)
-
-            for n = 1:size(Ra, 2)
-                vals_a = [vals_a; sort(real(eig(0.5 * (Ra{u, n} + Ra{u, n}'))), 'descend')];
-                vals_c = [vals_c; sort(real(eig(0.5 * (Rc{u, n} + Rc{u, n}'))), 'descend')];
-            end
-
-        end
-
-    else
-
-        for u = 1:size(Ra, 3)
-
-            for n = 1:size(Ra, 4)
-                A = Ra(:, :, u, n);
-                C = Rc(:, :, u, n);
-                vals_a = [vals_a; sort(real(eig(0.5 * (A + A'))), 'descend')];
-                vals_c = [vals_c; sort(real(eig(0.5 * (C + C'))), 'descend')];
-            end
-
-        end
-
+function R = covariance_cells(Rxx, Lxu, U, N)
+    if iscell(Rxx)
+        R = Rxx;
+        return;
     end
 
-    err = norm(vals_a - vals_c) / max(1, norm(vals_c));
+    if isscalar(Lxu)
+        Lxu = repmat(Lxu, 1, U);
+    end
+
+    R = cell(U, N);
+
+    for u = 1:U
+        for n = 1:N
+            R{u, n} = Rxx(1:Lxu(u), 1:Lxu(u), u, n);
+        end
+    end
+end
+
+function ranges = user_ranges(Lxu, U)
+    if isscalar(Lxu)
+        Lxu = repmat(Lxu, 1, U);
+    end
+
+    ends = cumsum(Lxu);
+    starts = [1, ends(1:end - 1) + 1];
+    ranges = cell(1, U);
+
+    for u = 1:U
+        ranges{u} = starts(u):ends(u);
+    end
+end
+
+function value = logdet_spd(matrix)
+    factor = chol(0.5 * (matrix + matrix'));
+    value = 2 * sum(log(real(diag(factor))));
 end
 
 function ok = check_psd(Rxxs)
     ok = true;
 
     if iscell(Rxxs)
-
-        for u = 1:size(Rxxs, 1)
-
-            for n = 1:size(Rxxs, 2)
-                R = Rxxs{u, n};
-
-                if any(real(eig(0.5 * (R + R'))) < -1e-8)
-                    ok = false;
-                    return;
-                end
-
-            end
-
-        end
-
+        blocks = Rxxs;
     else
+        blocks = cell(size(Rxxs, 3), size(Rxxs, 4));
 
         for u = 1:size(Rxxs, 3)
-
             for n = 1:size(Rxxs, 4)
-                R = Rxxs(:, :, u, n);
-
-                if any(real(eig(0.5 * (R + R'))) < -1e-8)
-                    ok = false;
-                    return;
-                end
-
+                blocks{u, n} = Rxxs(:, :, u, n);
             end
-
         end
-
     end
 
+    for i = 1:numel(blocks)
+        covariance = 0.5 * (blocks{i} + blocks{i}');
+
+        if any(real(eig(covariance)) < -1e-9)
+            ok = false;
+            return;
+        end
+    end
 end
