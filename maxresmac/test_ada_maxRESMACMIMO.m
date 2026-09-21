@@ -4,6 +4,8 @@ clear;
 clc;
 rng(42);
 
+require_mex('maxresmac_mex');
+
 tests = struct();
 
 tests(1).name = 'siso';
@@ -185,7 +187,7 @@ function result = run_test(tc, seedOffset)
 
     tic;
     [~, Ecanonical, wcanonical, bcanonical] = maxRESMACMIMO( ...
-        Hwhite, tc.Lxu, tc.Etotal, tc.theta, tc.cb, false);
+        Hwhite, tc.Lxu, tc.Etotal, tc.theta, tc.cb, true);
     canonicalMs = toc * 1000;
     tic;
     [Radaptive, Eadaptive, wadaptive, badaptive, info] = ada_maxRESMACMIMO( ...
@@ -202,10 +204,14 @@ function result = run_test(tc, seedOffset)
         max(1, abs(adaptiveObjective));
     energyError = abs(sum(Eadaptive, 'all') - tc.Etotal) / max(tc.Etotal, 1);
     closureError = learned_closure_error(info);
+    priorityGap = max(abs(sum(badaptive, 2) - sum(bcanonical, 2))) / ...
+        max(1, max(sum(bcanonical, 2)));
+    orderMatch = isequal(info.order(:), priority_order(tc.theta));
     [dualResidual, complementarityResidual] = oracle_kkt_residual( ...
         Hwhite, Radaptive, tc.Lxu, tc.theta, tc.cb);
     passed = relativeGap <= tc.gapTol && learnedGap <= 1e-8 && ...
         energyError <= 1e-10 && closureError <= 1e-10 && ...
+        priorityGap <= tc.gapTol && orderMatch && ...
         dualResidual <= 2e-2 && complementarityResidual <= 2e-2 && ...
         check_psd(Radaptive);
 
@@ -213,6 +219,8 @@ function result = run_test(tc, seedOffset)
         canonicalObjective, adaptiveObjective);
     fprintf('  relative objective gap:       %.3e\n', relativeGap);
     fprintf('  learned-rate gap:             %.3e\n', learnedGap);
+    fprintf('  per-user priority-rate gap:   %.3e (order match %d)\n', ...
+        priorityGap, orderMatch);
     fprintf('  canonical/adaptive energy:    %.8f / %.8f\n', ...
         sum(Ecanonical, 'all'), sum(Eadaptive, 'all'));
     fprintf('  canonical/adaptive w:         %.6g / %.6g\n', ...
@@ -245,6 +253,11 @@ function result = empty_result()
     result = struct('name', '', 'canonicalObjective', 0, ...
         'adaptiveObjective', 0, 'relativeGap', inf, ...
         'canonicalMs', 0, 'adaptiveMs', 0, 'passed', false);
+end
+
+function order = priority_order(theta)
+    [~, order] = sort(theta(:), 'descend');
+    order = order(:);
 end
 
 function Y = exact_pilot_samples(channel, noiseFactor, Atx, X)
@@ -422,4 +435,13 @@ function ok = check_psd(Rxxs)
             return;
         end
     end
+end
+
+function require_mex(name)
+
+    if exist(name, 'file') ~= 3
+        error('test:mexMissing', ...
+            'canonical reference %s not found; compile it before benchmarking', name);
+    end
+
 end
