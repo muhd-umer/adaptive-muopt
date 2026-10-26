@@ -67,12 +67,6 @@ function [Rxxs, Eun, w, bun] = maxRESMACMIMO(H, Lxu, Etotal, theta, cb, use_mex)
             Rxxs = Rxx_cell;
         end
 
-        if uniform_flag
-            Rxxs = real(Rxxs);
-        else
-            Rxxs = cellfun(@real, Rxxs, 'UniformOutput', false);
-        end
-
         return;
     end
 

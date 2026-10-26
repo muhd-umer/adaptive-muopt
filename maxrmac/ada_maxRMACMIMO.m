@@ -2,21 +2,26 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
     %ADA_MAXRMACMIMO Learn a maxRMAC covariance design from pilot samples
     %
     % Args:
-    %   pilot: Structure with numRx, numTones, and sample fields where
-    %     sample(n, Atx, X) returns numRx-by-size(X, 2) received samples
+    %   pilot: Structure with numRx, numTones, and either a sample field where
+    %     sample(n, Atx, X) returns numRx-by-size(X, 2) received samples, or an
+    %     observe field where [Y, X] = observe(n, Atx) returns received samples
+    %     together with the known pilot symbols the sampler transmitted
     %   Lxu: Number of transmit dimensions per user
-    %   Eu: Per-user transmit-energy budgets
+    %   Eu: Per-user transmit-energy budgets, zero for an unscheduled user
     %   theta: Nonnegative user weights
     %   cb: Rate scaling, one for complex and two for real baseband
     %   opts: Optional algorithm settings
     %
     % Returns:
-    %   Rxxs: Per-user, per-tone covariance matrices
+    %   Rxxs: Per-user, per-tone covariance matrices, the proposed design in
+    %     single-pass mode
     %   Eun: Per-user, per-tone energies
     %   w: Estimated per-user energy multipliers
     %   bun: Learned rates at the observed covariance
-    %   info: Learned receiver quantities and convergence diagnostics, with
-    %     observedR identifying the measured covariance in single-pass mode
+    %   info: Learned receiver quantities and convergence diagnostics; in
+    %     single-pass mode observed holds the measured design and its learned
+    %     rates while proposed holds the new design and the rates the learned
+    %     information predicts for it
 
     if nargin < 6 || isempty(opts)
         opts = struct();
@@ -30,11 +35,13 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
     Ly = pilot.numRx;
     Ltot = sum(Lxu);
     totalEnergy = sum(Eu);
+    active = Eu > 0;
     [stheta, order] = sort(theta, 'descend');
     delta = stheta - [stheta(2:end); 0];
     ranges = user_ranges(Lxu);
     sortedRanges = user_ranges(Lxu(order));
     sortedRows = concatenate_ranges(ranges(order));
+    silentRows = concatenate_ranges(sortedRanges(~active(order)));
 
     numPilots = get_opt(opts, 'numPilots', max(256, 8 * (Ltot + Ly)));
     maxOuter = get_opt(opts, 'maxOuter', 100);
@@ -63,26 +70,28 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
     rng(rngSeed);
     X = training_pilots(Ltot, numPilots, cb);
 
-    averageEnergy = min(Eu) / max(N * max(Lxu), 1);
+    % each scheduled user explores at a floor tied to its own budget, so a
+    % silent user neither forces a zero floor on the others nor sounds itself
+    averageEnergy = Eu ./ max(N * Lxu(:), 1);
     floorInitial = get_opt(opts, 'floorInitial', 1e-3 * averageEnergy);
     floorFinal = get_opt(opts, 'floorFinal', 1e-9 * averageEnergy);
-    floorInitial = max(real(floorInitial), 0);
-    floorFinal = max(min(real(floorFinal), floorInitial), 0);
+    floorInitial = max(real(floorInitial(:)), 0) .* ones(U, 1) .* active;
+    floorFinal = max(min(real(floorFinal(:)) .* ones(U, 1), floorInitial), 0) .* active;
 
-    if totalEnergy > 0 && (floorInitial <= 0 || floorFinal <= 0)
+    if any(active & (floorInitial <= 0 | floorFinal <= 0))
         error('positive energy requires positive exploration floors');
     end
 
-    if any(floorInitial * N * Lxu(:) > Eu(:) + 1e-12)
+    if any(floorInitial * N .* Lxu(:) > Eu(:) + 1e-12)
         error('floorInitial is incompatible with Eu');
     end
 
     R = initial_covariance(opts, Lxu, N, Eu, ranges, floorInitial);
     data = evaluate_design(pilot, R, X, ranges, sortedRanges, sortedRows, ...
-        order, delta, cb, ridge, errorFloor, [], singlePass);
+        order, delta, cb, ridge, errorFloor, [], singlePass, silentRows);
 
     if totalEnergy > 0
-        data = attach_gradients(data, sortedRanges, order, delta, cb);
+        data = attach_gradients(data, sortedRanges, order, delta, cb, active);
     end
 
     initialObjective = data.objective;
@@ -95,6 +104,7 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
     stableCount = 0;
     converged = false;
     pilotCalls = N;
+    pilotSamples = data.samples;
     lastFloor = floorInitial;
 
     if isfield(opts, 'stepInitial') && ~isempty(opts.stepInitial)
@@ -141,7 +151,13 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
         bun = data.bun;
         lambda = estimate_multipliers(currentR, data.gradient, floorInitial, U, N);
         w = lambda * cb * log(2);
+        [predictedBun, predictedObjective] = predict_design(data, R, ...
+            sortedRanges, order, delta, cb);
         info = struct();
+        info.observed = struct('R', {currentR}, 'bun', data.bun, ...
+            'objective', data.objective);
+        info.proposed = struct('R', {R}, 'predictedBun', predictedBun, ...
+            'predictedObjective', predictedObjective);
         info.order = order;
         info.delta = delta;
         info.Wle = data.Wle;
@@ -161,7 +177,7 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
         info.iterations = accepted;
         info.converged = false;
         info.pilotCalls = N;
-        info.pilotSymbols = N * numPilots;
+        info.pilotSymbols = data.samples;
         info.numPilots = numPilots;
         info.observedR = currentR;
         info.state = struct('R0', {R});
@@ -192,9 +208,9 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
 
     for iter = 1:maxOuter
         floorNow = exploration_floor(floorInitial, floorFinal, iter, floorDecay);
-        floorHistory(iter) = floorNow;
+        floorHistory(iter) = max(floorNow);
         lastFloor = floorNow;
-        floorBottomed = floorNow <= floorFinal * (1 + 1e-9);
+        floorBottomed = all(floorNow <= floorFinal * (1 + 1e-9));
         gradientNorm = covariance_norm(data.gradient);
 
         if gradientNorm <= eps || totalEnergy == 0
@@ -247,8 +263,9 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
 
             candidateData = evaluate_design(pilot, candidate, X, ranges, ...
                 sortedRanges, sortedRows, order, delta, cb, ridge, errorFloor, ...
-                candidateFactors);
+                candidateFactors, false, silentRows);
             pilotCalls = pilotCalls + N;
+            pilotSamples = pilotSamples + candidateData.samples;
 
             if candidateData.objective >= reference + armijo * trialStep * directionalGain - objectiveSlack
                 acceptedStep = true;
@@ -268,7 +285,7 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
         displacement = covariance_difference(candidate, R);
         covarianceChange = covariance_norm(displacement) / max(1, covariance_norm(R));
         R = candidate;
-        data = attach_gradients(candidateData, sortedRanges, order, delta, cb);
+        data = attach_gradients(candidateData, sortedRanges, order, delta, cb, active);
         accepted = accepted + 1;
         objectiveHistory(accepted + 1) = data.objective;
         covarianceHistory(accepted) = covarianceChange;
@@ -299,8 +316,9 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
     prefinalGradient = data.gradient;
     R = remove_exploration_floor(R, ranges, Eu, lastFloor);
     finalData = evaluate_design(pilot, R, X, ranges, sortedRanges, sortedRows, ...
-        order, delta, cb, ridge, errorFloor, [], true);
+        order, delta, cb, ridge, errorFloor, [], true, silentRows);
     pilotCalls = pilotCalls + N;
+    pilotSamples = pilotSamples + finalData.samples;
 
     if totalEnergy == 0
         initialObjective = 0;
@@ -344,7 +362,7 @@ function [Rxxs, Eun, w, bun, info] = ada_maxRMACMIMO(pilot, Lxu, Eu, theta, cb, 
     info.iterations = accepted;
     info.converged = converged;
     info.pilotCalls = pilotCalls;
-    info.pilotSymbols = pilotCalls * numPilots;
+    info.pilotSymbols = pilotSamples;
     info.numPilots = numPilots;
     info.state = struct('R0', {R});
     info.runtime = toc(tstart);
@@ -352,10 +370,11 @@ end
 
 function [pilot, Lxu, Eu, theta, cb, uniformFlag] = validate_inputs( ...
         pilot, Lxu, Eu, theta, cb)
-    required = {'numRx', 'numTones', 'sample'};
+    required = {'numRx', 'numTones'};
 
-    if ~isstruct(pilot) || ~all(isfield(pilot, required))
-        error('pilot must contain numRx, numTones, and sample');
+    if ~isstruct(pilot) || ~all(isfield(pilot, required)) || ...
+            ~(isfield(pilot, 'sample') || isfield(pilot, 'observe'))
+        error('pilot must contain numRx, numTones, and sample or observe');
     end
 
     if ~isscalar(pilot.numRx) || pilot.numRx < 1 || pilot.numRx ~= fix(pilot.numRx)
@@ -367,7 +386,13 @@ function [pilot, Lxu, Eu, theta, cb, uniformFlag] = validate_inputs( ...
         error('pilot.numTones must be a positive integer');
     end
 
-    if ~isa(pilot.sample, 'function_handle')
+    if isfield(pilot, 'observe')
+
+        if ~isa(pilot.observe, 'function_handle')
+            error('pilot.observe must be a function handle');
+        end
+
+    elseif ~isa(pilot.sample, 'function_handle')
         error('pilot.sample must be a function handle');
     end
 
@@ -458,7 +483,7 @@ function R = initial_covariance(opts, Lxu, N, Eu, ranges, floorValue)
 end
 
 function data = evaluate_design(pilot, R, X, ranges, sortedRanges, sortedRows, ...
-        order, delta, cb, ridge, errorFloor, factors, needOutputs)
+        order, delta, cb, ridge, errorFloor, factors, needOutputs, silentRows)
 
     if nargin < 12
         factors = [];
@@ -468,15 +493,18 @@ function data = evaluate_design(pilot, R, X, ranges, sortedRanges, sortedRows, .
         needOutputs = false;
     end
 
+    if nargin < 14
+        silentRows = [];
+    end
+
     U = numel(ranges);
     N = pilot.numTones;
-    Ly = pilot.numRx;
-    count = size(X, 2);
     Ltot = size(X, 1);
     data.C = cell(1, N);
     data.Ablocks = cell(1, N);
     data.gradient = cell(U, N);
     data.objective = 0;
+    data.samples = 0;
 
     if needOutputs
         data.Wle = cell(1, N);
@@ -497,13 +525,11 @@ function data = evaluate_design(pilot, R, X, ranges, sortedRanges, sortedRows, .
             Ablocks = factors.Ablocks(:, n);
         end
 
-        Y = pilot.sample(n, Atx, X);
-
-        if ~isnumeric(Y) || ~isequal(size(Y), [Ly, count]) || any(~isfinite(Y(:)))
-            error('pilot.sample returned an invalid received-sample matrix');
-        end
-
-        Xs = X(sortedRows, :);
+        [Y, Xn] = pilot_samples(pilot, n, Atx, X);
+        count = size(Xn, 2);
+        Ly = size(Y, 1);
+        data.samples = data.samples + count;
+        Xs = Xn(sortedRows, :);
         Ryy = (Y * Y') / count;
         scale = max(real(trace(Ryy)) / max(Ly, 1), 1);
         Wle = (Xs * Y') / count / (hermitian(Ryy) + ridge * scale * eye(Ly));
@@ -512,6 +538,12 @@ function data = evaluate_design(pilot, R, X, ranges, sortedRanges, sortedRows, .
         [Ve, De] = eig(E);
         e = min(max(real(diag(De)), errorFloor), 1);
         E = hermitian(Ve * diag(e) * Ve');
+        % the receiver knows its own schedule, so an unscheduled user's
+        % streams carry no information by construction
+        E(silentRows, :) = 0;
+        E(:, silentRows) = 0;
+        E(silentRows, silentRows) = eye(numel(silentRows));
+        Wle(silentRows, :) = 0;
         J = hermitian(E \ eye(Ltot));
         [C, flag] = chol(J);
 
@@ -558,16 +590,16 @@ function data = evaluate_design(pilot, R, X, ranges, sortedRanges, sortedRows, .
 
 end
 
-function data = attach_gradients(data, sortedRanges, order, delta, cb)
+function data = attach_gradients(data, sortedRanges, order, delta, cb, active)
 
     for n = 1:numel(data.C)
         data.gradient(:, n) = covariance_gradient(data.C{n}, ...
-            data.Ablocks{n}, sortedRanges, order, delta, cb);
+            data.Ablocks{n}, sortedRanges, order, delta, cb, active);
     end
 
 end
 
-function gradients = covariance_gradient(C, Ablocks, sortedRanges, order, delta, cb)
+function gradients = covariance_gradient(C, Ablocks, sortedRanges, order, delta, cb, active)
     U = numel(order);
     gradients = cell(U, 1);
     errors = cell(U, 1);
@@ -587,6 +619,11 @@ function gradients = covariance_gradient(C, Ablocks, sortedRanges, order, delta,
         Lj = numel(idx);
         Q = zeros(Lj);
 
+        if ~active(order(j))
+            gradients{order(j)} = Q;
+            continue;
+        end
+
         for k = j:U
 
             if delta(k) == 0
@@ -603,6 +640,103 @@ function gradients = covariance_gradient(C, Ablocks, sortedRanges, order, delta,
         gradients{u} = hermitian(gradient);
     end
 
+end
+
+function [Y, Xn] = pilot_samples(pilot, n, Atx, X)
+    %PILOT_SAMPLES Transmit pilots at Atx on tone n through the pilot interface
+    %
+    % Args:
+    %   pilot: Pilot interface with either sample or observe
+    %   n: Tone index
+    %   Atx: Block-diagonal transmit factor
+    %   X: Solver-chosen pilot symbols, ignored by an observe interface
+    %
+    % Returns:
+    %   Y: Received samples
+    %   Xn: Pilot symbols that produced Y
+
+    if isfield(pilot, 'observe')
+        [Y, Xn] = pilot.observe(n, Atx);
+    else
+        Y = pilot.sample(n, Atx, X);
+        Xn = X;
+    end
+
+    if ~isnumeric(Y) || size(Y, 1) ~= pilot.numRx || size(Y, 2) ~= size(Xn, 2) || ...
+            size(Xn, 1) ~= size(Atx, 2) || size(Xn, 2) < size(Xn, 1) || ...
+            any(~isfinite(Y(:)))
+        error('the pilot interface returned an invalid received-sample matrix');
+    end
+
+end
+
+function [bun, objective] = predict_design(data, R, sortedRanges, order, delta, cb)
+    %PREDICT_DESIGN Rates the learned information predicts at a new design
+    %
+    % The information matrix measured at the factor A satisfies
+    % J - I = A' * Gram * A, so a design with factor B = A * M is scored by
+    % I + M' * (J - I) * M without ever forming the Gram matrix
+    %
+    % Args:
+    %   data: Measurement at the observed design with J and Ablocks
+    %   R: Proposed per-user, per-tone covariance cells
+    %   sortedRanges: Stream index ranges in decoding order
+    %   order: Users sorted by descending weight
+    %   delta: Successive weight differences
+    %   cb: Rate scaling
+    %
+    % Returns:
+    %   bun: Predicted per-user, per-tone rates
+    %   objective: Predicted weighted rate
+
+    U = numel(order);
+    N = numel(data.J);
+    bun = zeros(U, N);
+    objective = 0;
+
+    for n = 1:N
+        blocks = cell(1, U);
+
+        for k = 1:U
+            u = order(k);
+            A = data.Ablocks{n}{u};
+            [V, D] = eig(hermitian(R{u, n}));
+            B = V * diag(sqrt(max(real(diag(D)), 0)));
+
+            if norm(B, 'fro') == 0 || rank(A) < size(A, 1)
+                blocks{k} = zeros(size(A, 2), size(B, 2));
+            else
+                blocks{k} = A \ B;
+            end
+
+        end
+
+        M = blkdiag(blocks{:});
+        T = hermitian(M' * (data.J{n} - eye(size(data.J{n}))) * M);
+        previousLogdet = 0;
+
+        for k = 1:U
+            currentEnd = sortedRanges{k}(end);
+            span = 1:currentEnd;
+            current = logdet_spd(eye(currentEnd) + T(span, span));
+            bun(order(k), n) = (current - previousLogdet) / (cb * log(2));
+            objective = objective + delta(k) * current / (cb * log(2));
+            previousLogdet = current;
+        end
+
+    end
+
+end
+
+function value = logdet_spd(matrix)
+    [C, flag] = chol(hermitian(matrix));
+
+    if flag ~= 0
+        value = sum(log(max(real(eig(hermitian(matrix))), realmin)));
+        return;
+    end
+
+    value = 2 * sum(log(real(diag(C))));
 end
 
 function [Atx, Ablocks] = transmit_factor(column, ranges, Ltot)
@@ -706,7 +840,7 @@ function [R, factors] = project_covariances(R, ranges, budgets, floorValue)
             offset = offset + numel(values);
         end
 
-        projected = waterfill_pool(pooled, budgets(u), floorValue);
+        projected = waterfill_pool(pooled, budgets(u), floorValue(min(u, end)));
         offset = 0;
 
         for n = 1:N
@@ -761,7 +895,7 @@ end
 
 function floorValue = exploration_floor(initial, final, iteration, decay)
 
-    if initial <= final
+    if all(initial <= final)
         floorValue = final;
         return;
     end
@@ -785,18 +919,22 @@ function R = remove_exploration_floor(R, ranges, budgets, floorValue)
         end
 
         used = 0;
+        before = 0;
 
         for n = 1:N
             [V, D] = eig(hermitian(R{u, n}));
-            values = max(real(diag(D)) - floorValue, 0);
+            before = before + sum(real(diag(D)));
+            values = max(real(diag(D)) - floorValue(min(u, end)), 0);
             R{u, n} = hermitian(V * diag(values) * V');
             used = used + sum(values);
         end
 
+        % restore only the energy the floor displaced, so a user whose
+        % budget is slack stays slack instead of being inflated to it
         if used > 0
 
             for n = 1:N
-                R{u, n} = R{u, n} * (budgets(u) / used);
+                R{u, n} = R{u, n} * (min(budgets(u), before) / used);
             end
 
         end
@@ -809,9 +947,9 @@ end
 function lambda = estimate_multipliers(R, gradient, floorValue, U, N)
     lambda = zeros(U, 1);
     scale = max(covariance_norm(R), 1);
-    threshold = max(10 * floorValue, 1e-9 * scale);
 
     for u = 1:U
+        threshold = max(10 * floorValue(min(u, end)), 1e-9 * scale);
         valueParts = cell(N, 1);
 
         for n = 1:N

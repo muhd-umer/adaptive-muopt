@@ -94,12 +94,6 @@ function [Rxxs, Eun, w, bun] = maxRMACMIMO(H, Lxu, Eu, theta, cb, use_mex)
             Rxxs = Rxx_cell;
         end
 
-        if uniform_flag
-            Rxxs = real(Rxxs);
-        else
-            Rxxs = cellfun(@real, Rxxs, 'UniformOutput', false);
-        end
-
         return;
     end
 
