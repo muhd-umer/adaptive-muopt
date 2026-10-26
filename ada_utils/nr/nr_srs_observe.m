@@ -1,65 +1,57 @@
 function obs = nr_srs_observe(H, env, active)
-    %NR_SRS_OBSERVE Received non-precoded SRS of every scheduled UE, grouped by PRG
+    %NR_SRS_OBSERVE Received non-precoded SRS of every scheduled UE, per comb offset and PRG
     %
-    % Every UE sounds all of its ports at once with its own cyclic shift on
-    % the shared comb, so each SRS RE is one joint sample of all streams. The
-    % comb concentrates the sounding energy on 1/KTC of the subcarriers
+    % Every UE sounds all of its ports at once with its own cyclic shifts, so
+    % each SRS RE of a comb offset is one joint sample of the streams of the
+    % UEs on that offset. The comb concentrates the sounding energy on 1/KTC
+    % of the subcarriers
     %
     % Args:
-    %   H: Slot response from nr_channel_slot
+    %   H: Slot response of the SRS slot from nr_channel_slot
     %   env: Environment from nr_setup
     %   active: Logical vector of UEs that sound in this slot
     %
     % Returns:
-    %   obs: Per-PRG received samples Y and pilot symbols X, the sounding factor
-    %     A with X observed through H * A, the silent stream rows, and each
-    %     sample's subcarrier offset from the PRG centre in PRG widths
+    %   obs: 1-by-S struct array, one per comb offset, with the per-PRG
+    %     received samples Y, pilot symbols X over all Ltot streams, sample
+    %     offsets from the PRG centre in PRG widths, the sounding factor A
+    %     with X observed through H * A, and the rows silent on that offset
 
-    U = env.U;
-    positions = env.srs.positions;
-    count = size(positions, 1);
-    X = zeros(env.Ltot, count);
-    A = zeros(env.Ltot);
-    silent = [];
+    obs = struct('Y', {}, 'X', {}, 'offsets', {}, 'A', {}, 'silentRows', {});
+    flat = reshape(H, size(H, 1), size(H, 2), []);
 
-    for u = 1:U
-        rows = env.ranges{u};
-        X(rows, :) = transpose(env.srs.values{u});
+    for group = env.srs.groups
+        sounding = group.ues(active(group.ues));
+        count = size(group.positions, 1);
+        X = zeros(env.Ltot, count);
+        A = zeros(env.Ltot);
 
-        if active(u)
-            A(rows, rows) = sqrt(env.srs.portEnergy(u)) * eye(numel(rows));
-        else
-            silent = [silent, rows]; %#ok<AGROW>
+        for u = group.ues
+            X(env.ranges{u}, :) = transpose(env.srs.values{u});
         end
 
+        for u = sounding
+            A(env.ranges{u}, env.ranges{u}) = sqrt(env.srs.portEnergy(u)) * eye(env.Lxu(u));
+        end
+
+        linear = sub2ind([env.numSubcarriers, env.numSymbols], group.positions(:, 1), ...
+            group.positions(:, 2));
+        S = A * X;
+        Y = reshape(pagemtimes(flat(:, :, linear), reshape(S, env.Ltot, 1, [])), size(H, 1), []);
+        Y = Y + env.noiseFactor * (randn(size(Y)) + 1j * randn(size(Y))) / sqrt(2);
+        entry = struct('Y', {cell(1, env.numGroups)}, 'X', {cell(1, env.numGroups)}, ...
+            'offsets', {cell(1, env.numGroups)}, 'A', A, ...
+            'silentRows', setdiff(1:env.Ltot, cell2mat(env.ranges(sounding))));
+
+        for g = 1:env.numGroups
+            members = group.groupOf == g;
+            entry.Y{g} = Y(:, members);
+            entry.X{g} = X(:, members);
+            entry.offsets{g} = (group.positions(members, 1)' - mean(env.groups{g})) / ...
+                numel(env.groups{g});
+        end
+
+        obs(end + 1) = entry; %#ok<AGROW>
     end
 
-    Y = received(H, positions, A * X, env);
-    obs = struct('A', A, 'silentRows', silent);
-    obs.Y = cell(1, env.numGroups);
-    obs.X = cell(1, env.numGroups);
-    obs.offsets = cell(1, env.numGroups);
-
-    for g = 1:env.numGroups
-        members = env.srs.groupOf == g;
-        obs.Y{g} = Y(:, members);
-        obs.X{g} = X(:, members);
-        obs.offsets{g} = (positions(members, 1)' - mean(env.groups{g})) / numel(env.groups{g});
-    end
-
-end
-
-function Y = received(H, positions, S, env)
-    count = size(positions, 1);
-    linear = sub2ind([env.numSubcarriers, env.numSymbols], positions(:, 1), positions(:, 2));
-    flat = reshape(H, size(H, 1), size(H, 2), []);
-    channel = flat(:, :, linear);
-    Y = squeeze(pagemtimes(channel, reshape(S, size(S, 1), 1, count)));
-
-    if size(H, 1) == 1
-        Y = reshape(Y, 1, count);
-    end
-
-    noise = (randn(size(H, 1), count) + 1j * randn(size(H, 1), count)) / sqrt(2);
-    Y = Y + env.noiseFactor * noise;
 end

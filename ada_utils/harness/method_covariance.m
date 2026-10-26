@@ -3,7 +3,8 @@ function method = method_covariance()
     %
     % Every UE transmits a full-rank per-band covariance, the gNB learns from
     % its DMRS, runs the matching adaptive solver, and sends a quantized
-    % covariance message (nr_cov_policy), a nonstandard payload
+    % covariance message (nr_cov_policy), a nonstandard payload. The full-rank
+    % DMRS must be observed jointly, so every layer must fit in one CDM group
     %
     % Returns:
     %   method: Handles init(name, ctx, active) and step(state, ctx, input,
@@ -15,6 +16,12 @@ end
 function state = init(name, ctx, active)
     env = ctx.env;
     modeB = ctx.modeB;
+
+    if numel(env.dmrs.cdm) > 1
+        error('method_covariance:dmrs', ['cov-pilot needs all %d layers in one DMRS CDM ' ...
+            'group, which holds 4'], env.Ltot);
+    end
+
     state = method_state(name, ctx, active);
     state.numTones = ceil(env.numGroups / modeB.bundle);
     state.tones = arrayfun(@(k) (k - 1) * modeB.bundle + 1:min(k * modeB.bundle, ...
@@ -142,8 +149,8 @@ end
 
 function [Y, X] = observe(H, env, groups, tone, Atx, store)
     %OBSERVE DMRS of the full-rank covariance design on the PRGs of one tone
-    positions = env.dmrs.positions;
-    members = find(ismember(env.dmrs.groupOf, groups));
+    positions = env.dmrs.cdm.positions;
+    members = find(ismember(env.dmrs.cdm.groupOf, groups));
     X = zeros(env.Ltot, numel(members));
 
     for u = 1:env.U

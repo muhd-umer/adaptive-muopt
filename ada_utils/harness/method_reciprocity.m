@@ -4,7 +4,8 @@ function method = method_reciprocity()
     % The gNB learns receiver statistics from DMRS and precodes downlink
     % CSI-RS with them (nr_recip_policy); each UE estimates its Grams from that
     % CSI-RS (ue_csirs_gram) and deploys its best response (ue_best_response)
-    % as a per-PRG non-codebook precoder. 'ue-pilot' keeps a flat power
+    % as a per-PRG non-codebook precoder in the first uplink slot at least
+    % processingSlots after the CSI-RS. 'ue-pilot' keeps a flat power
     % spectral density, 'ue-pilot-free' may move energy across PRGs. The gNB
     % signals only the SRI when a UE's layer count changes and, for a shared
     % budget, accumulated TPC steps
@@ -30,7 +31,7 @@ end
 function [state, record] = step(state, ctx, input, record)
     env = ctx.env;
     G = env.numGroups;
-    D = ctx.cfg.control.delay;
+    ready = input.downlink.slot + ctx.cfg.csirs.processingSlots;
     [state, record] = apply_updates(state, ctx, input.active, input.slot, record);
 
     factors = cov_factors(state.R);
@@ -59,15 +60,14 @@ function [state, record] = step(state, ctx, input, record)
             continue;
         end
 
-        obs = nr_csirs_observe(input.downlink.H, env, ctx.cfg, u, plan.precoders{u}, ...
-            ctx.calibration);
-        Q = ue_csirs_gram(obs, env, ctx.cfg);
-        record.csirsRE = record.csirsRE + numel(Q) * env.csirs.resources{1}.numRE;
+        obs = nr_csirs_observe(input.downlink.H, env, ctx.cfg, u, plan, ctx.calibration);
+        Q = ue_csirs_gram(obs, env, ctx.cfg, plan.recordAfter{u});
+        record.csirsRE = record.csirsRE + sum(cellfun(@(r) r.numRE, obs.resources(2:end)));
         sounded = true;
         best = ue_best_response(Q, plan.delta(plan.terms{u}), state.budget(u), ...
             struct('R0', cat(3, state.R{u, :}), 'flatPsd', state.flatPsd, ...
             'iterations', ctx.ue.iterations));
-        state.pending(end + 1) = struct('due', input.downlink.slot + D, 'ue', u, ...
+        state.pending(end + 1) = struct('due', ready, 'ue', u, ...
             'R', {squeeze(num2cell(best, [1 2]))'});
         state.evaluations = state.evaluations + 1;
         rank = effective_rank(best);
@@ -75,7 +75,7 @@ function [state, record] = step(state, ctx, input, record)
         state.ranks(u) = rank;
     end
 
-    record.csirsRE = record.csirsRE + sounded * env.csirs.imRE;
+    record.csirsRE = record.csirsRE + sounded * (env.csirs.base.numRE + env.csirs.imRE);
 
     for u = find(sri(:)' | plan.tpc(:)')
         record.designBits = record.designBits + sri(u) * env.dci.sriNonCodebook(u) + ...
@@ -85,7 +85,7 @@ function [state, record] = step(state, ctx, input, record)
     end
 
     record.dataFraction = data_fraction(env, false);
-    target = next_occasion(ctx, input.downlink.slot + D);
+    target = next_occasion(ctx, ready);
 
     if target <= size(state.plan, 2)
         state.plan(:, target) = nr_mcs(max(plan.rates - state.backoff, 0), ...

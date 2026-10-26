@@ -9,7 +9,8 @@ function result = nr_run(cfg, env, spec, realization)
     % latest SRS are observed, and only then does each policy decide, so a
     % decision taken in slot s first takes effect in the first uplink slot at
     % or after s + delay. The reciprocity methods sound their CSI-RS in the
-    % first downlink or special slot at least lagSlots after the DMRS
+    % first downlink or special slot at least lagSlots after the DMRS, and
+    % the UE's new precoder waits processingSlots after the CSI-RS
     %
     % Args:
     %   cfg: Configuration from nr_default_config

@@ -1,56 +1,79 @@
-function Q = ue_csirs_gram(obs, env, cfg)
-    %UE_CSIRS_GRAM UE estimate of its per-PRG Grams from gNB-precoded CSI-RS
+function Q = ue_csirs_gram(obs, env, cfg, recordAfter)
+    %UE_CSIRS_GRAM UE estimate of its per-PRG Grams from the gNB-precoded CSI-RS
     %
-    % The UE runs nrChannelEstimate with FD-CDM2 despreading inside each PRG,
-    % since the precoding changes at PRG boundaries, and reads one estimate C
-    % of the precoded channel per port, RB, and CSI-RS symbol. Its noise level
-    % comes from the CSI-IM samples and the error variance of C from the
-    % estimator's noise gain. Averaging conj(C * C') over a PRG estimates the
-    % Gram plus numRx times that error variance, which is removed
+    % On each resource the UE runs nrChannelEstimate with CDM despreading
+    % inside each PRG, since the precoding changes at PRG boundaries, and
+    % reads one estimate C of the precoded channel per port, RB, and CSI-RS
+    % symbol. Its noise level comes from the CSI-IM samples and the error
+    % variance of C from the estimator's noise gain. Averaging conj(C * C')
+    % over a PRG estimates the resource's Gram plus ports times that error
+    % variance, which is removed. The cell-wide Gram less the update Grams
+    % received so far is the Gram of each SIC term
     %
     % Args:
     %   obs: Observation from nr_csirs_observe
     %   env: Environment from nr_setup
     %   cfg: Configuration with csirs.averaging and prgRB
+    %   recordAfter: Number of updates before each term the UE decodes within
     %
     % Returns:
-    %   Q: 1-by-K cell of Lu-by-Lu-by-G Gram estimates
+    %   Q: 1-by-K cell of Lu-by-Lu-by-G Gram estimates, one per term
 
-    G = env.numGroups;
     noise = mean(abs(obs.im(:)) .^ 2);
-    Q = cell(1, numel(obs.grids));
+    moments = cell(1, numel(obs.grids));
 
     for k = 1:numel(obs.grids)
-        resource = env.csirs.resources{k};
-        grid = obs.grids{k};
-        Lu = size(grid, 3);
-        estimate = nrChannelEstimate(env.carrier, grid, resource.linear, ...
-            obs.amplitude * resource.values, 'CDMLengths', [2 1], ...
-            'AveragingWindow', cfg.csirs.averaging, 'PRGBundleSize', cfg.prgRB, ...
-            'Interpolation', 'off');
-        ports = size(estimate, 4);
-        C = zeros(Lu, ports, numel(resource.reads{1}));
+        moments{k} = moment(obs.grids{k}, obs.resources{k}, obs.amplitude, noise, env, cfg);
+    end
 
-        for p = 1:ports
-            plane = reshape(estimate(:, :, :, p), [], Lu);
+    running = cumsum(cat(4, moments{2:end}, zeros(size(moments{1}))), 4);
+    Q = cell(1, numel(recordAfter));
 
-            for o = 1:size(C, 3)
-                C(:, p, o) = mean(plane(resource.reads{p}{o}, :), 1).';
-            end
+    for i = 1:numel(recordAfter)
+        Q{i} = moments{1};
 
+        if recordAfter(i) > 0
+            Q{i} = Q{i} - running(:, :, :, recordAfter(i));
         end
 
-        bias = ports * noise * resource.noiseGain / obs.amplitude ^ 2 * eye(Lu);
-        Q{k} = zeros(Lu, Lu, G);
+        Q{i} = psd(Q{i});
+    end
 
-        for g = 1:G
-            samples = C(:, :, resource.readGroup == g);
-            moment = conj(sum(pagemtimes(samples, 'none', samples, 'ctranspose'), 3)) / ...
-                size(samples, 3) - bias;
-            [W, E] = eig(0.5 * (moment + moment'));
-            Q{k}(:, :, g) = W * diag(max(real(diag(E)), 0)) * W';
+end
+
+function M = moment(grid, resource, amplitude, noise, env, cfg)
+    Lu = size(grid, 3);
+    estimate = nrChannelEstimate(env.carrier, grid, resource.linear, ...
+        amplitude * resource.values, 'CDMLengths', resource.cdm, ...
+        'AveragingWindow', cfg.csirs.averaging, 'PRGBundleSize', cfg.prgRB, ...
+        'Interpolation', 'off');
+    C = zeros(Lu, resource.ports, numel(resource.reads{1}));
+
+    for p = 1:resource.ports
+        plane = reshape(estimate(:, :, :, p), [], Lu);
+
+        for o = 1:size(C, 3)
+            C(:, p, o) = mean(plane(resource.reads{p}{o}, :), 1).';
         end
 
+    end
+
+    bias = resource.ports * noise * resource.noiseGain / amplitude ^ 2 * eye(Lu);
+    M = zeros(Lu, Lu, env.numGroups);
+
+    for g = 1:env.numGroups
+        samples = C(:, :, resource.readGroup == g);
+        M(:, :, g) = conj(sum(pagemtimes(samples, 'none', samples, 'ctranspose'), 3)) / ...
+            size(samples, 3) - bias;
+    end
+
+end
+
+function Q = psd(Q)
+
+    for g = 1:size(Q, 3)
+        [W, E] = eig(0.5 * (Q(:, :, g) + Q(:, :, g)'));
+        Q(:, :, g) = W * diag(max(real(diag(E)), 0)) * W';
     end
 
 end

@@ -3,9 +3,10 @@ function env = nr_setup(cfg)
     %
     % SRS, DMRS, and CSI-RS symbols and resource-element positions come from
     % the 5G Toolbox, so every learner observes exactly the REs a gNB or UE
-    % would. The SRS of all UEs shares one comb and is separated by cyclic
-    % shift, and the DMRS ports of all UEs share one CDM group, so both uplink
-    % observations are joint across users
+    % would. SRS ports share a comb through cyclic shifts as long as the comb
+    % has room, and DMRS ports fill the CDM groups of the smallest DMRS type
+    % that holds every layer; the UEs on one comb or in one CDM group are
+    % observed jointly
     %
     % Args:
     %   cfg: Configuration from nr_default_config
@@ -14,16 +15,27 @@ function env = nr_setup(cfg)
     %   env: Carrier, TDD pattern, grid sizes, PRG groups, reference-signal
     %     mappings, codebook catalogs, DCI fields, and overhead
 
-    if exist('nrPUSCHCodebook', 'file') ~= 2 || exist('nrSRS', 'file') ~= 2
+    if exist('nrPUSCHCodebook', 'file') ~= 2 || exist('nrCDLChannel', 'file') ~= 2
         error('nr_setup:toolbox', 'the NR experiments need the 5G Toolbox');
     end
 
     U = numel(cfg.Lxu);
+
+    if numel(cfg.theta) ~= U || numel(cfg.userGainDb) ~= U || ~all(ismember(cfg.Lxu, [1 2 4]))
+        error('nr_setup:ues', 'theta and userGainDb need one entry per UE, with 1, 2, or 4 ports');
+    end
+
+    if cfg.numRx ~= prod(cfg.gnbArray)
+        error('nr_setup:array', 'numRx must equal prod(gnbArray)');
+    end
+
     env = struct();
     env.U = U;
+    env.numRx = cfg.numRx;
     env.Lxu = cfg.Lxu;
     env.Ltot = sum(cfg.Lxu);
-    env.ranges = user_ranges(cfg.Lxu);
+    ends = cumsum(cfg.Lxu);
+    env.ranges = arrayfun(@(u) ends(u) - cfg.Lxu(u) + 1:ends(u), 1:U, 'UniformOutput', false);
     env.carrier = nrCarrierConfig('NSizeGrid', cfg.carrier.NRB, ...
         'SubcarrierSpacing', cfg.carrier.scs);
     env.ofdm = nrOFDMInfo(env.carrier);
@@ -38,17 +50,12 @@ function env = nr_setup(cfg)
     env.numGroups = env.numSubcarriers / groupSize;
 
     if env.numGroups ~= fix(env.numGroups)
-        error('the carrier must hold a whole number of PRGs');
+        error('nr_setup:prg', 'the carrier must hold a whole number of PRGs');
     end
 
-    env.groups = cell(1, env.numGroups);
-
-    for g = 1:env.numGroups
-        env.groups{g} = (g - 1) * groupSize + (1:groupSize);
-    end
-
+    env.groups = arrayfun(@(g) (g - 1) * groupSize + (1:groupSize), 1:env.numGroups, ...
+        'UniformOutput', false);
     env.selectSubcarriers = 1:cfg.selectStride:env.numSubcarriers;
-
     env.srs = srs_mapping(cfg, env);
     env.dmrs = dmrs_mapping(cfg, env);
     env.csirs = csirs_mapping(cfg, env);
@@ -66,108 +73,16 @@ function env = nr_setup(cfg)
             [env.catalogs{u}.rows.tpmi] == 0, 1);
     end
 
-    env.dci = nr_dci(env.catalogs, cfg.Lxu, cfg.carrier.NRB);
+    env.dci = nr_dci(env.catalogs, cfg.Lxu, cfg.carrier.NRB, env.dmrs.type);
     env.dmrsSymbols = numel(env.dmrs.symbols);
     env.srsSymbols = numel(env.srs.symbols);
 
     if ~isempty(cfg.noise.covariance)
         env.noiseFactor = chol(cfg.noise.covariance, 'lower');
     else
-        env.noiseFactor = eye(cfg.numRx);
+        env.noiseFactor = eye(env.numRx);
     end
 
-    env.dmrsBoost = 10 ^ (cfg.dmrs.boostDb / 20);
-end
-
-function srs = srs_mapping(cfg, env)
-    U = env.U;
-    srs = struct();
-    srs.indices = cell(1, U);
-    srs.values = cell(1, U);
-    srs.config = cell(1, U);
-
-    for u = 1:U
-        config = nrSRSConfig;
-        config.NumSRSPorts = cfg.Lxu(u);
-        config.NumSRSSymbols = cfg.srs.symbols;
-        config.SymbolStart = cfg.srs.symbolStart;
-        config.KTC = cfg.srs.ktc;
-        config.CSRS = cfg.srs.csrs;
-        config.CyclicShift = cfg.srs.cyclicShifts(u);
-        config.SRSPeriod = [1 0];
-        carrier = env.carrier;
-        carrier.NSlot = 0;
-        indices = double(nrSRSIndices(carrier, config, 'IndexStyle', 'subscript', ...
-            'IndexBase', '1based'));
-        values = unit_power(nrSRS(carrier, config));
-        perPort = size(values, 1);
-        srs.indices{u} = reshape(indices(:, 1:2), perPort, cfg.Lxu(u), 2);
-        srs.values{u} = values;
-        srs.config{u} = config;
-    end
-
-    positions = squeeze(srs.indices{1}(:, 1, :));
-
-    for u = 2:U
-
-        if ~isequal(squeeze(srs.indices{u}(:, 1, :)), positions)
-            error('every UE must sound on the same comb for a joint observation');
-        end
-
-    end
-
-    srs.positions = positions;
-    srs.symbols = unique(positions(:, 2))';
-    srs.groupOf = group_of(positions(:, 1), env);
-    srs.portEnergy = env.pcap(:) * cfg.srs.ktc ./ cfg.Lxu(:);
-end
-
-function dmrs = dmrs_mapping(cfg, env)
-    U = env.U;
-    dmrs = struct();
-    dmrs.values = cell(U, max(cfg.Lxu));
-    dmrs.positions = [];
-
-    for u = 1:U
-
-        for rank = 1:cfg.Lxu(u)
-            pusch = nrPUSCHConfig;
-            pusch.NumLayers = rank;
-            pusch.NumAntennaPorts = rank;
-            pusch.PRBSet = 0:cfg.carrier.NRB - 1;
-            pusch.TransmissionScheme = 'nonCodebook';
-            pusch.DMRS.DMRSConfigurationType = 1;
-            pusch.DMRS.DMRSAdditionalPosition = cfg.dmrs.additionalPosition;
-            pusch.DMRS.DMRSLength = cfg.dmrs.length;
-            pusch.DMRS.NumCDMGroupsWithoutData = 2;
-            pusch.DMRS.DMRSPortSet = cfg.dmrs.ports{u}(1:rank);
-            values = unit_power(nrPUSCHDMRS(env.carrier, pusch));
-            indices = double(nrPUSCHDMRSIndices(env.carrier, pusch, ...
-                'IndexStyle', 'subscript', 'IndexBase', '1based'));
-            perLayer = size(values, 1);
-            positions = indices(1:perLayer, 1:2);
-
-            for layer = 2:rank
-
-                if ~isequal(indices((layer - 1) * perLayer + (1:perLayer), 1:2), positions)
-                    error('the DMRS layers of one UE must share a CDM group');
-                end
-
-            end
-
-            if isempty(dmrs.positions)
-                dmrs.positions = positions;
-            elseif ~isequal(dmrs.positions, positions)
-                error('the DMRS ports of every UE must share one CDM group');
-            end
-
-            dmrs.values{u, rank} = values;
-        end
-
-    end
-
-    dmrs.symbols = unique(dmrs.positions(:, 2))';
-    dmrs.groupOf = group_of(dmrs.positions(:, 1), env);
 end
 
 function tdd = tdd_pattern(cfg, env)
@@ -182,10 +97,6 @@ function tdd = tdd_pattern(cfg, env)
     tdd = struct('pattern', pattern, 'downlinkRE', env.numSubcarriers * symbols / ...
         (numel(pattern) * env.slotDuration));
 
-    if any(pattern == 'S') && cfg.csirs.symbolStart + cfg.csirs.symbols > cfg.tdd.special(1)
-        error('nr_setup:tdd', 'the CSI-RS symbols must fit in the downlink part of the S slot');
-    end
-
     for slot = cfg.srs.offset:cfg.srs.periodSlots:cfg.srs.offset + lcm(numel(pattern), ...
             cfg.srs.periodSlots)
         type = pattern(mod(slot, numel(pattern)) + 1);
@@ -198,81 +109,334 @@ function tdd = tdd_pattern(cfg, env)
 
 end
 
-function csirs = csirs_mapping(cfg, env)
-    %CSIRS_MAPPING NZP CSI-RS resources of the reciprocity loop, one per SIC term of a UE
+function srs = srs_mapping(cfg, env)
+    %SRS_MAPPING Comb, comb offset, and cyclic shift of every UE's SRS
     %
-    % Each resource has one port per gNB antenna, density one, and FD-CDM2,
-    % and the resources of a UE sit at distinct subcarrier offsets of the
-    % same symbols. The noise gain of the UE's estimator is measured once on
-    % pure noise, which a UE knows of its own receiver
-    rows = containers.Map({2, 4}, {3, 4});
-    spacing = containers.Map({2, 4}, {2, 4});
+    % Comb 2 offers 8 cyclic shifts and comb 4 offers 12; a UE with L ports
+    % takes shifts spaced by Nmax / L. The smallest comb that fits every
+    % port on one comb offset keeps the sounding joint; otherwise the UEs fill
+    % the comb-4 offsets in turn
+    U = env.U;
+    combs = [2 8; 4 12];
+    choice = find(sum(cfg.Lxu) <= combs(:, 2), 1);
 
-    if ~isKey(rows, cfg.numRx)
-        error('nr_setup:csirs', 'CSI-RS needs 2 or 4 gNB antennas, not %d', cfg.numRx);
+    if isempty(choice)
+        choice = 2;
     end
 
-    symbols = cfg.csirs.symbolStart + (0:cfg.csirs.symbols - 1);
-    count = numel(symbols);
-    offsets = 0:spacing(cfg.numRx):11;
-    csirs = struct('resources', {cell(1, env.U)}, 'imRE', 4 * cfg.carrier.NRB);
-    stream = RandStream('mt19937ar', 'Seed', 4093);
+    ktc = combs(choice, 1);
+    shiftsMax = combs(choice, 2);
+    used = cell(1, ktc);
+    placement = zeros(U, 2);
 
-    for r = 1:env.U
-        config = nrCSIRSConfig('CSIRSType', repmat({'nzp'}, 1, count), ...
-            'CSIRSPeriod', 'on', 'RowNumber', rows(cfg.numRx) * ones(1, count), ...
-            'Density', repmat({'one'}, 1, count), 'SymbolLocations', num2cell(symbols), ...
-            'SubcarrierLocations', repmat({offsets(mod(r - 1, numel(offsets)) + 1)}, 1, count), ...
-            'NumRB', cfg.carrier.NRB);
-        carrier = env.carrier;
-        carrier.NSlot = 0;
-        linear = double(nrCSIRSIndices(carrier, config));
-        subscripts = double(nrCSIRSIndices(carrier, config, 'IndexStyle', 'subscript', ...
-            'IndexBase', '1based'));
-        values = nrCSIRS(carrier, config);
-        values = values ./ abs(values);
-        [cells, ~, slotRE] = unique(sub2ind([env.numSubcarriers, env.numSymbols], ...
-            subscripts(:, 1), subscripts(:, 2)));
-        portSymbols = zeros(numel(cells), cfg.numRx);
-        portSymbols(sub2ind(size(portSymbols), slotRE, subscripts(:, 3))) = values;
-        [subcarriers, ~] = ind2sub([env.numSubcarriers, env.numSymbols], cells);
-        resource = struct('linear', linear, 'values', values, 'cells', cells, ...
-            'portSymbols', portSymbols, 'cellGroup', group_of(subcarriers, env));
-        resource.reads = cell(1, cfg.numRx);
+    for u = 1:U
+        step = shiftsMax / cfg.Lxu(u);
+        placed = false;
 
-        for p = 1:cfg.numRx
-            mine = subscripts(:, 3) == p;
-            occasion = (ceil(subscripts(mine, 1) / 12) - 1) * env.numSymbols + subscripts(mine, 2);
-            [~, ~, label] = unique(occasion);
-            spots = sub2ind([env.numSubcarriers, env.numSymbols], subscripts(mine, 1), ...
-                subscripts(mine, 2));
-            resource.reads{p} = reshape(accumarray(label, spots, [], @(x) {sort(x)}), 1, []);
+        for offset = 1:ktc
+
+            for shift = 0:step - 1
+                taken = mod(shift + step * (0:cfg.Lxu(u) - 1), shiftsMax);
+
+                if ~any(ismember(taken, used{offset}))
+                    used{offset} = [used{offset}, taken];
+                    placement(u, :) = [offset - 1, shift];
+                    placed = true;
+                    break;
+                end
+
+            end
+
+            if placed
+                break;
+            end
+
         end
 
-        first = cellfun(@(x) x(1), resource.reads{1});
-        [k, ~] = ind2sub([env.numSubcarriers, env.numSymbols], first);
-        resource.readGroup = group_of(k, env)';
-        resource.noiseGain = noise_gain(env, cfg, resource, stream);
-        resource.numRE = numel(cells);
-        csirs.resources{r} = resource;
+        if ~placed
+            error('nr_setup:srs', 'the SRS ports of all UEs do not fit on comb %d', ktc);
+        end
+
     end
 
+    srs = struct('ktc', ktc, 'values', {cell(1, U)}, 'portEnergy', env.pcap(:) * ktc ./ cfg.Lxu(:));
+    offsets = unique(placement(:, 1))';
+    srs.groups = struct('ues', {}, 'positions', {}, 'groupOf', {});
+
+    for offset = offsets
+        members = find(placement(:, 1) == offset)';
+        positions = [];
+
+        for u = members
+            config = nrSRSConfig('NumSRSPorts', cfg.Lxu(u), 'NumSRSSymbols', cfg.srs.symbols, ...
+                'SymbolStart', cfg.srs.symbolStart, 'KTC', ktc, 'KBarTC', offset, ...
+                'CyclicShift', placement(u, 2), 'CSRS', cfg.srs.csrs, 'SRSPeriod', [1 0]);
+            carrier = env.carrier;
+            carrier.NSlot = 0;
+            indices = double(nrSRSIndices(carrier, config, 'IndexStyle', 'subscript', ...
+                'IndexBase', '1based'));
+            srs.values{u} = unit_power(nrSRS(carrier, config));
+            mine = indices(indices(:, 3) == 1, 1:2);
+
+            if isempty(positions)
+                positions = mine;
+            elseif ~isequal(mine, positions)
+                error('nr_setup:srs', 'UEs on one comb offset must sound the same REs');
+            end
+
+        end
+
+        srs.groups(end + 1) = struct('ues', members, 'positions', positions, ...
+            'groupOf', group_of(positions(:, 1), env));
+    end
+
+    srs.symbols = unique(srs.groups(1).positions(:, 2))';
+end
+
+function dmrs = dmrs_mapping(cfg, env)
+    %DMRS_MAPPING DMRS type, CDM group, and ports of every UE, and their sequences
+    %
+    % Each UE keeps all of its ports in one CDM group, filled largest UE
+    % first; a rank-r transmission uses the first r ports. Every CDM group is
+    % left without data, which sets the DMRS power boost (TS 38.214 Table
+    % 6.2.2-1)
+    U = env.U;
+    groupPorts = {{[0 1 4 5], [2 3 6 7]}, {[0 1 6 7], [2 3 8 9], [4 5 10 11]}};
+    type = find(sum(cfg.Lxu) <= [8 12], 1);
+
+    if isempty(type)
+        error('nr_setup:dmrs', 'more than 12 layers exceed the orthogonal DMRS ports');
+    end
+
+    ports = groupPorts{type};
+    free = 4 * ones(1, numel(ports));
+    cdmOf = zeros(1, U);
+    [~, sequence] = sort(cfg.Lxu, 'descend');
+
+    for u = sequence
+        group = find(free >= cfg.Lxu(u), 1);
+
+        if isempty(group)
+            error('nr_setup:dmrs', 'the UE ports do not pack into the DMRS CDM groups');
+        end
+
+        cdmOf(u) = group;
+        free(group) = free(group) - cfg.Lxu(u);
+    end
+
+    dmrs = struct('type', type, 'cdmOf', cdmOf, 'boost', sqrt(numel(ports)), ...
+        'ports', {cell(1, U)}, 'values', {cell(U, max(cfg.Lxu))});
+    dmrs.cdm = struct('ues', {}, 'positions', {}, 'groupOf', {});
+
+    for c = unique(cdmOf)
+        members = find(cdmOf == c);
+        start = 0;
+        positions = [];
+
+        for u = members
+            dmrs.ports{u} = ports{c}(start + (1:cfg.Lxu(u)));
+            start = start + cfg.Lxu(u);
+
+            for rank = 1:cfg.Lxu(u)
+                pusch = nrPUSCHConfig('NumLayers', rank, 'NumAntennaPorts', cfg.Lxu(u), ...
+                    'PRBSet', 0:cfg.carrier.NRB - 1, 'TransmissionScheme', 'nonCodebook');
+                pusch.DMRS.DMRSConfigurationType = type;
+                pusch.DMRS.DMRSAdditionalPosition = cfg.dmrs.additionalPosition;
+                pusch.DMRS.DMRSLength = cfg.dmrs.length;
+                pusch.DMRS.NumCDMGroupsWithoutData = numel(ports);
+                pusch.DMRS.DMRSPortSet = dmrs.ports{u}(1:rank);
+                values = unit_power(nrPUSCHDMRS(env.carrier, pusch));
+                indices = double(nrPUSCHDMRSIndices(env.carrier, pusch, ...
+                    'IndexStyle', 'subscript', 'IndexBase', '1based'));
+                mine = indices(1:size(values, 1), 1:2);
+
+                if isempty(positions)
+                    positions = mine;
+                elseif ~isequal(mine, positions)
+                    error('nr_setup:dmrs', 'the ports of one CDM group must share REs');
+                end
+
+                dmrs.values{u, rank} = values;
+            end
+
+        end
+
+        dmrs.cdm(end + 1) = struct('ues', members, 'positions', positions, ...
+            'groupOf', group_of(positions(:, 1), env));
+    end
+
+    dmrs.symbols = unique(dmrs.cdm(1).positions(:, 2))';
+end
+
+function csirs = csirs_mapping(cfg, env)
+    %CSIRS_MAPPING NZP CSI-RS resources of the reciprocity loop and the CSI-IM
+    %
+    % One cell-wide resource has a port per gNB antenna; resource pair{u, j}
+    % has a port per antenna of UE j and carries UE u's update for adding UE
+    % j to its receiver covariance. All use density one and the FD-CDM2 row of
+    % their port count (TS 38.211 Table 7.4.1.5.3-1) and are packed with the
+    % CSI-IM into the downlink symbols without sharing an RE. The noise gain
+    % of the UE's estimator on each resource is measured once on pure noise,
+    % which a UE knows of its own receiver
+    U = env.U;
+    pattern = env.tdd.pattern;
+    period = numel(pattern);
+    last = env.numSymbols - 1;
+
+    for slot = find(pattern == 'U') - 1
+        later = slot + cfg.csirs.lagSlots + (0:2 * period);
+        types = pattern(mod(later, period) + 1);
+
+        if types(find(types ~= 'U', 1)) == 'S'
+            last = min(last, cfg.tdd.special(1) - 1);
+        end
+
+    end
+
+    occupied = false(12, env.numSymbols);
+    stream = RandStream('mt19937ar', 'Seed', 4093);
+    [csirs.base, occupied] = place(env.numRx, occupied, cfg, env, last, stream);
+    csirs.pair = cell(U, U);
+
+    for u = 1:U
+
+        for j = setdiff(1:U, u)
+            [csirs.pair{u, j}, occupied] = place(env.Lxu(j), occupied, cfg, env, last, stream);
+        end
+
+    end
+
+    [~, occupied] = place(4, occupied, cfg, env, last, []);
+    csirs.imRE = 4 * cfg.carrier.NRB;
+    csirs.occupied = occupied;
+end
+
+function [resource, occupied] = place(ports, occupied, cfg, env, last, stream)
+    %PLACE First free position of a CSI-RS resource and its observation layout
+    rows = containers.Map({1, 2, 4, 8, 12, 16, 24, 32}, {2, 3, 4, 6, 9, 11, 13, 16});
+    counts = containers.Map({1, 2, 4, 8, 12, 16, 24, 32}, {1, 1, 1, 4, 6, 4, 3, 4});
+
+    if ~isKey(rows, ports)
+        error('nr_setup:csirs', 'no CSI-RS row has %d ports', ports);
+    end
+
+    row = rows(ports);
+    numK = counts(ports);
+    width = 2 - (row == 2) + 2 * (row == 4);
+    pair = ismember(row, [11 13 16]);
+    split = ismember(row, [13 16]);
+    found = false;
+
+    for l0 = cfg.csirs.symbolStart:last
+
+        symbols = l0 + (0:pair);
+
+        if split
+            symbols = [symbols, l0 + 2 + (0:1)];
+        end
+
+        if symbols(end) > last
+            break;
+        end
+
+        for k0 = 0:2:12 - width * numK
+            subcarriers = k0 + (0:width * numK - 1);
+
+            if row == 4 && mod(k0, 4) ~= 0
+                continue;
+            end
+
+            if ~any(occupied(subcarriers + 1, symbols + 1), 'all')
+                found = true;
+                break;
+            end
+
+        end
+
+        if found
+            break;
+        end
+
+    end
+
+    if ~found
+        error('nr_setup:csirs', 'the CSI-RS resources do not fit in the downlink symbols');
+    end
+
+    occupied(subcarriers + 1, symbols + 1) = true;
+    resource = [];
+
+    if isempty(stream)
+        return;
+    end
+
+    locations = {l0};
+
+    if split
+        locations = {[l0, l0 + 2]};
+    end
+
+    ks = k0 + width * (0:numK - 1);
+
+    if numK == 1
+        ks = k0;
+    end
+
+    config = nrCSIRSConfig('CSIRSType', {'nzp'}, 'CSIRSPeriod', 'on', 'RowNumber', row, ...
+        'Density', {'one'}, 'SymbolLocations', locations, 'SubcarrierLocations', {ks}, ...
+        'NumRB', cfg.carrier.NRB);
+    carrier = env.carrier;
+    carrier.NSlot = 0;
+    linear = double(nrCSIRSIndices(carrier, config));
+    subscripts = double(nrCSIRSIndices(carrier, config, 'IndexStyle', 'subscript', ...
+        'IndexBase', '1based'));
+
+    if ~isequal(unique(mod(subscripts(:, 1) - 1, 12))', subcarriers) || ...
+            ~isequal(unique(subscripts(:, 2) - 1)', symbols)
+        error('nr_setup:csirs', 'CSI-RS row %d does not occupy the planned REs', row);
+    end
+
+    values = nrCSIRS(carrier, config);
+    values = values ./ abs(values);
+    cdm = [2 - (row == 2), 1];
+    [cells, ~, position] = unique(sub2ind([env.numSubcarriers, env.numSymbols], ...
+        subscripts(:, 1), subscripts(:, 2)));
+    portSymbols = zeros(numel(cells), ports);
+    portSymbols(sub2ind(size(portSymbols), position, subscripts(:, 3))) = values;
+    [k, ~] = ind2sub([env.numSubcarriers, env.numSymbols], cells);
+    resource = struct('ports', ports, 'cdm', cdm, 'linear', linear, 'values', values, ...
+        'cells', cells, 'portSymbols', portSymbols, 'cellGroup', group_of(k, env), ...
+        'numRE', numel(cells));
+    resource.reads = cell(1, ports);
+
+    for p = 1:ports
+        mine = subscripts(:, 3) == p;
+        occasion = (ceil(subscripts(mine, 1) / 12) - 1) * env.numSymbols + subscripts(mine, 2);
+        [~, ~, label] = unique(occasion);
+        spots = sub2ind([env.numSubcarriers, env.numSymbols], subscripts(mine, 1), ...
+            subscripts(mine, 2));
+        resource.reads{p} = reshape(accumarray(label, spots, [], @(x) {sort(x)}), 1, []);
+    end
+
+    first = cellfun(@(x) x(1), resource.reads{1});
+    [k, ~] = ind2sub([env.numSubcarriers, env.numSymbols], first);
+    resource.readGroup = group_of(k, env)';
+    resource.noiseGain = noise_gain(env, cfg, resource, stream);
 end
 
 function gain = noise_gain(env, cfg, resource, stream)
     %NOISE_GAIN Output variance of the UE's CSI-RS estimator per unit input noise
-    trials = 20;
     total = 0;
     entries = 0;
 
-    for i = 1:trials
+    for trial = 1:10
         grid = (randn(stream, env.numSubcarriers, env.numSymbols) + ...
             1j * randn(stream, env.numSubcarriers, env.numSymbols)) / sqrt(2);
         estimate = nrChannelEstimate(env.carrier, grid, resource.linear, resource.values, ...
-            'CDMLengths', [2 1], 'AveragingWindow', cfg.csirs.averaging, ...
+            'CDMLengths', resource.cdm, 'AveragingWindow', cfg.csirs.averaging, ...
             'PRGBundleSize', cfg.prgRB, 'Interpolation', 'off');
 
-        for p = 1:cfg.numRx
+        for p = 1:resource.ports
             plane = estimate(:, :, 1, p);
             reads = cellfun(@(x) mean(plane(x)), resource.reads{p});
             total = total + sum(abs(reads) .^ 2);
@@ -289,17 +453,5 @@ function values = unit_power(values)
 end
 
 function groupOf = group_of(subcarriers, env)
-    groupSize = env.numSubcarriers / env.numGroups;
-    groupOf = ceil(subcarriers / groupSize);
-end
-
-function ranges = user_ranges(Lxu)
-    ends = cumsum(Lxu);
-    starts = [1, ends(1:end - 1) + 1];
-    ranges = cell(1, numel(Lxu));
-
-    for u = 1:numel(Lxu)
-        ranges{u} = starts(u):ends(u);
-    end
-
+    groupOf = ceil(subcarriers / (env.numSubcarriers / env.numGroups));
 end

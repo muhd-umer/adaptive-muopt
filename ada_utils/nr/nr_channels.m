@@ -1,9 +1,11 @@
 function chan = nr_channels(cfg, env, seed)
-    %NR_CHANNELS Continuously evolving TDL channels of every UE for one realization
+    %NR_CHANNELS Continuously evolving CDL channels from every UE array to the gNB panel
     %
-    % Each UE gets its own nrTDLChannel whose fading process runs without
-    % interruption from slot to slot, so mobility is the toolbox's Doppler
-    % evolution rather than a regenerated or autoregressive approximation
+    % Each UE gets its own nrCDLChannel whose fading process runs without
+    % interruption, so mobility is the toolbox's Doppler evolution. The CDL
+    % profile is set up in downlink terms (gNB transmits) with the UE at a
+    % random azimuth inside the sector and a random array orientation, then
+    % swapped to the reciprocal uplink link
     %
     % Args:
     %   cfg: Configuration from nr_default_config
@@ -14,47 +16,48 @@ function chan = nr_channels(cfg, env, seed)
     %   chan: Channel objects, path filters, and the per-UE amplitude scaling
 
     U = env.U;
-    chan = struct();
-    chan.objects = cell(1, U);
-    chan.filters = cell(1, U);
-    chan.scale = sqrt(env.gain(:));
-    chan.offsets = nan(1, U);
+    stream = RandStream('mt19937ar', 'Seed', seed);
     speeds = cfg.channel.speedKmh(:) .* ones(U, 1);
-    samplesPerSlot = round(env.ofdm.SampleRate * env.slotDuration);
+    chan = struct('objects', {cell(1, U)}, 'filters', {cell(1, U)}, ...
+        'scale', sqrt(env.gain(:)), 'offsets', nan(1, U));
 
     for u = 1:U
-        doppler = speeds(u) / 3.6 * cfg.channel.carrierGHz * 1e9 / physconst('LightSpeed');
-        tdl = nrTDLChannel;
-        tdl.DelayProfile = cfg.channel.delayProfile;
-        tdl.DelaySpread = cfg.channel.delaySpread;
-        tdl.MaximumDopplerShift = doppler;
-        tdl.NumTransmitAntennas = cfg.Lxu(u);
-        tdl.NumReceiveAntennas = cfg.numRx;
-        tdl.MIMOCorrelation = get_opt(cfg.channel, 'correlation', 'Low');
-
-        if strcmp(tdl.MIMOCorrelation, 'Medium') || strcmp(tdl.MIMOCorrelation, 'High')
-            tdl.TransmissionDirection = 'Uplink';
-        end
-
-        tdl.SampleRate = env.ofdm.SampleRate;
-        tdl.ChannelFiltering = false;
-        tdl.NormalizeChannelOutputs = false;
-        tdl.NumTimeSamples = samplesPerSlot;
-        tdl.RandomStream = 'mt19937ar with seed';
-        tdl.Seed = seed * 16 + u;
-        chan.objects{u} = tdl;
-        chan.filters{u} = getPathFilters(tdl);
-        chan.doppler(u) = doppler;
+        cdl = nrCDLChannel;
+        cdl.DelayProfile = cfg.channel.delayProfile;
+        cdl.DelaySpread = cfg.channel.delaySpread;
+        cdl.CarrierFrequency = cfg.channel.carrierGHz * 1e9;
+        cdl.MaximumDopplerShift = speeds(u) / 3.6 * cdl.CarrierFrequency / physconst('LightSpeed');
+        cdl.TransmitAntennaArray.Size = [cfg.gnbArray, 1, 1];
+        cdl.ReceiveAntennaArray.Size = [ue_array(cfg.Lxu(u)), 1, 1];
+        cdl.AngleScaling = true;
+        cdl.AngleSpreads = cfg.channel.angleSpreads;
+        cdl.MeanAngles = [cfg.channel.sectorDeg * (rand(stream) - 0.5), ...
+            360 * (rand(stream) - 0.5), 90, 90];
+        cdl.SampleRate = env.ofdm.SampleRate;
+        cdl.ChannelFiltering = false;
+        cdl.NormalizeChannelOutputs = false;
+        cdl.NumTimeSamples = round(env.ofdm.SampleRate * env.slotDuration);
+        cdl.RandomStream = 'mt19937ar with seed';
+        cdl.Seed = seed * 16 + u;
+        swapTransmitAndReceive(cdl);
+        chan.objects{u} = cdl;
+        chan.filters{u} = getPathFilters(cdl);
     end
 
 end
 
-function value = get_opt(opts, name, default)
+function shape = ue_array(ports)
+    %UE_ARRAY Rows, columns, and polarizations of a UE array with this many ports
 
-    if isfield(opts, name) && ~isempty(opts.(name))
-        value = opts.(name);
-    else
-        value = default;
+    switch ports
+        case 1
+            shape = [1 1 1];
+        case 2
+            shape = [1 1 2];
+        case 4
+            shape = [1 2 2];
+        otherwise
+            error('nr_channels:ports', 'UEs have 1, 2, or 4 antenna ports, not %d', ports);
     end
 
 end

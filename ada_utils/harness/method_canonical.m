@@ -102,26 +102,72 @@ function [b, E, split] = capped_canonical(H, Lxu, Etotal, caps, theta, split)
     %CAPPED_CANONICAL Shared budget with per-UE caps through a maxRMAC budget split
     %
     % The capped problem equals maxRMAC at the optimal split of the shared
-    % budget, where the energy prices of uncapped users agree; for two users
-    % the split is the root of w1 - w2, bracketed around the last slot's split
-
-    if numel(theta) ~= 2
-        error('the capped canonical reference is implemented for two users');
-    end
+    % budget, where the energy prices w of the uncapped UEs agree. Two UEs
+    % bisect on w1 - w2; more UEs use projected gradient ascent on the
+    % weighted rate, whose gradient in the budgets is w. Both start from the
+    % last slot's split
+    caps = caps(:);
 
     if sum(caps) <= Etotal
         [~, E, ~, b] = maxRMACMIMO(H, Lxu, caps, theta, 1, true);
-        split = caps(1) / Etotal;
+        split = caps / Etotal;
         return;
     end
 
+    if numel(theta) == 2
+        [b, E, split] = bisect_split(H, Lxu, Etotal, caps, theta, split);
+        return;
+    end
+
+    if isempty(split)
+        split = caps / sum(caps);
+    end
+
+    budgets = fit_split(split * Etotal, caps, Etotal);
+    [~, E, w, b] = maxRMACMIMO(H, Lxu, budgets, theta, 1, true);
+    value = theta(:)' * sum(b, 2);
+    step = 0.1 * Etotal / max(abs(w(:)));
+
+    for iteration = 1:20
+        direction = fit_split(budgets + step * w(:), caps, Etotal) - budgets;
+        gain = w(:)' * direction;
+
+        if gain <= 1e-9 * max(abs(value), 1)
+            break;
+        end
+
+        for backtrack = 1:6
+            trial = budgets + direction;
+            [~, trialE, trialW, trialB] = maxRMACMIMO(H, Lxu, trial, theta, 1, true);
+            trialValue = theta(:)' * sum(trialB, 2);
+
+            if trialValue >= value + 1e-4 * gain
+                break;
+            end
+
+            direction = direction / 2;
+            gain = gain / 2;
+        end
+
+        if trialValue < value
+            break;
+        end
+
+        [budgets, E, w, b, value] = deal(trial, trialE, trialW, trialB, trialValue);
+        step = 2 * step;
+    end
+
+    split = budgets / Etotal;
+end
+
+function [b, E, split] = bisect_split(H, Lxu, Etotal, caps, theta, split)
     low = max(0, Etotal - caps(2));
     high = min(caps(1), Etotal);
 
     if ~isempty(split)
         width = 0.15 * Etotal;
-        lowTrial = max(low, split * Etotal - width);
-        highTrial = min(high, split * Etotal + width);
+        lowTrial = max(low, split(1) * Etotal - width);
+        highTrial = min(high, split(1) * Etotal + width);
         [~, ~, wLow] = maxRMACMIMO(H, Lxu, [lowTrial; Etotal - lowTrial], theta, 1, true);
         [~, ~, wHigh] = maxRMACMIMO(H, Lxu, [highTrial; Etotal - highTrial], theta, 1, true);
 
@@ -146,5 +192,24 @@ function [b, E, split] = capped_canonical(H, Lxu, Etotal, caps, theta, split)
 
     middle = 0.5 * (low + high);
     [~, E, ~, b] = maxRMACMIMO(H, Lxu, [middle; Etotal - middle], theta, 1, true);
-    split = middle / Etotal;
+    split = [middle; Etotal - middle] / Etotal;
+end
+
+function x = fit_split(x, caps, total)
+    %FIT_SPLIT Projection onto {0 <= x <= caps, sum(x) = total}
+    low = min(x - caps) - 1;
+    high = max(x);
+
+    for iteration = 1:60
+        shift = 0.5 * (low + high);
+
+        if sum(min(max(x - shift, 0), caps)) > total
+            low = shift;
+        else
+            high = shift;
+        end
+
+    end
+
+    x = min(max(x - 0.5 * (low + high), 0), caps);
 end

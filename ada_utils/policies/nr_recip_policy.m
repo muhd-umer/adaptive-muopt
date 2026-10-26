@@ -1,17 +1,20 @@
 function [state, plan] = nr_recip_policy(state, ctx, dmrs, slot)
     %NR_RECIP_POLICY gNB side of reciprocity-based canonical adaptation (TDD, non-codebook PUSCH)
     %
-    % The gNB regresses the received DMRS on its known symbols, which yields
-    % every UE's effective channel through its own UE-chosen precoder and the
-    % residual noise-plus-interference covariance; summing those gives the
-    % receiver covariance S_k of every nested user set in the decoding order.
-    % These are the receiver-side GDFE statistics; the channel matrix itself is
-    % never formed. For UE u and each set k it decodes within, the gNB
-    % precodes downlink CSI-RS with inv(S_k without u)^(1/2), so by
-    % reciprocity the UE measures H_u' * inv(S_k without u) * H_u and can solve
-    % its own block of the canonical problem locally. For maxRESMAC the gNB
-    % also splits the shared budget into per-UE PUSCH powers, which it steers
-    % with ordinary accumulated TPC commands
+    % The gNB regresses the DMRS of each CDM group on its known symbols, which
+    % yields every UE's effective channel B_j through its own UE-chosen
+    % precoder, and pools the residuals of all groups and PRGs into one
+    % wideband noise-plus-interference covariance Rn; the channel matrix
+    % itself is never formed. UE u needs Q_k = H_u' * inv(S_k without u) * H_u
+    % for every nested set k it decodes within. The gNB sends one cell-wide
+    % CSI-RS precoded with inv(Rn)^(1/2) and, for each other UE j in decoding
+    % order, a CSI-RS with UE j's port count precoded with
+    % Y * B_j * inv(I + B_j' * Y * B_j)^(1/2), where Y is the inverse
+    % covariance before UE j is added. By the matrix inversion lemma every
+    % Q_k is the cell-wide Gram less the Grams of the updates before it, so
+    % the CSI-RS load grows with the UE ports rather than with the gNB
+    % antennas per term. For maxRESMAC the gNB also steers each UE's PUSCH
+    % power with accumulated TPC commands
     %
     % Args:
     %   state: Policy state with the per-UE budgets and the ready flag
@@ -20,66 +23,82 @@ function [state, plan] = nr_recip_policy(state, ctx, dmrs, slot)
     %   slot: Current slot
     %
     % Returns:
-    %   state: Updated budgets and learned rates
-    %   plan: Decoding order, term weights, the per-UE CSI-RS precoding
-    %     matrices, learned per-user rates, and the UEs sent a nonzero TPC step
+    %   state: Updated budgets
+    %   plan: Decoding order, term weights, the cell-wide precoder base, and
+    %     per UE the other UEs in the order they are added, the update
+    %     precoders, the terms with the number of updates before each, the
+    %     learned per-user rates, and the UEs sent a nonzero TPC step
 
     env = ctx.env;
     spec = ctx.objective;
     U = env.U;
     G = env.numGroups;
-    boost = env.dmrsBoost;
-    noise = zeros(size(dmrs.Y{1}, 1), size(dmrs.Y{1}, 1), G);
-    covariances = cell(1, U);
+    numRx = env.numRx;
+    boost = env.dmrs.boost;
+    [sorted, order] = sort(spec.theta(:), 'descend');
+    delta = sorted - [sorted(2:end); 0];
+    plan = struct('order', order(:)', 'delta', delta, 'base', [], ...
+        'others', {cell(1, U)}, 'updates', {cell(1, U)}, 'terms', {cell(1, U)}, ...
+        'recordAfter', {cell(1, U)}, 'rates', zeros(U, 1), 'tpc', false(U, 1));
 
-    for u = 1:U
-        covariances{u} = zeros(size(noise));
+    if isempty(dmrs.cdm)
+        return;
     end
 
-    for g = 1:G
-        Y = dmrs.Y{g};
-        X = dmrs.X{g};
-        count = size(X, 2);
-        layers = size(X, 1);
+    fits = cell(numel(dmrs.cdm), G);
+    residual = zeros(numRx);
+    dof = 0;
 
-        % the effective channel is allowed a first-order variation across the
-        % PRG, so frequency selectivity is not mistaken for noise
-        offsets = reshape(dmrs.offsets{g}, 1, []);
-        regressors = [X; X .* offsets];
-        coefficients = (Y * regressors') / (regressors * regressors' + ...
-            1e-12 * eye(2 * layers));
-        residual = Y - coefficients * regressors;
-        noise(:, :, g) = hermitian(residual * residual') / max(count - 2 * layers, 1);
-        spread = mean(offsets .^ 2);
-        % least-squares coefficients carry noise of covariance Rn * inv(Xa * Xa'),
-        % which would otherwise inflate every learned received covariance
-        sensitivity = real(diag(inv(regressors * regressors' + 1e-12 * eye(2 * layers))));
+    % the effective channel may vary linearly across the PRG, so frequency
+    % selectivity is not mistaken for noise
+    for c = 1:numel(dmrs.cdm)
+        group = dmrs.cdm(c);
 
-        for u = 1:U
+        for g = 1:G
+            X = group.X{g};
+            layers = size(X, 1);
+            offsets = reshape(group.offsets{g}, 1, []);
+            regressors = [X; X .* offsets];
+            normal = regressors * regressors' + 1e-12 * eye(2 * layers);
+            coefficients = (group.Y{g} * regressors') / normal;
+            misfit = group.Y{g} - coefficients * regressors;
+            residual = residual + misfit * misfit';
+            dof = dof + size(X, 2) - 2 * layers;
+            fits{c, g} = struct('coefficients', coefficients, 'layers', layers, ...
+                'sensitivity', real(diag(inv(normal))), 'spread', mean(offsets .^ 2));
+        end
 
-            if dmrs.ranks(u) > 0
-                rows = dmrs.layerRows{u};
-                level = coefficients(:, rows) / boost;
-                slope = coefficients(:, layers + rows) / boost;
-                bias = (sum(sensitivity(rows)) + spread * sum(sensitivity(layers + rows))) / ...
-                    boost ^ 2 * noise(:, :, g);
+    end
+
+    noise = hermitian(residual) / max(dof, 1);
+    covariances = repmat({zeros(numRx, numRx, G)}, 1, U);
+
+    % least-squares coefficients carry noise of covariance Rn * inv(Xa * Xa'),
+    % which would otherwise inflate every learned received covariance
+    for c = 1:numel(dmrs.cdm)
+        group = dmrs.cdm(c);
+
+        for g = 1:G
+            fit = fits{c, g};
+
+            for u = group.ues
+                rows = group.layerRows{u};
+                level = fit.coefficients(:, rows) / boost;
+                slope = fit.coefficients(:, fit.layers + rows) / boost;
+                bias = (sum(fit.sensitivity(rows)) + fit.spread * ...
+                    sum(fit.sensitivity(fit.layers + rows))) / boost ^ 2 * noise;
                 covariances{u}(:, :, g) = psd(hermitian(level * level' + ...
-                    spread * (slope * slope') - bias));
+                    fit.spread * (slope * slope') - bias));
             end
 
         end
 
     end
 
-    [sorted, order] = sort(spec.theta(:), 'descend');
-    delta = sorted - [sorted(2:end); 0];
-    active = state.active(:);
-    plan = struct('order', order(:)', 'delta', delta, 'precoders', {cell(1, U)}, ...
-        'terms', {cell(1, U)}, 'tpc', false(U, 1));
     rates = zeros(U, G);
 
     for g = 1:G
-        S = noise(:, :, g);
+        S = noise;
         previous = page_logdet(S);
 
         for k = 1:U
@@ -92,40 +111,54 @@ function [state, plan] = nr_recip_policy(state, ctx, dmrs, slot)
     end
 
     plan.rates = mean(rates, 2);
+    base = hermitian(inv(noise));
+    plan.base = repmat(base, 1, 1, G);
+    active = state.active(:)';
 
-    for u = find(active(:)')
+    for u = find(active)
         position = find(order == u);
         terms = position:U;
         terms = terms(delta(terms) > 0);
+        sequence = order(:)';
+        others = sequence(sequence ~= u & active(sequence));
         plan.terms{u} = terms;
-        plan.precoders{u} = cell(1, numel(terms));
+        plan.others{u} = others;
+        plan.recordAfter{u} = arrayfun(@(k) nnz(ismember(others, sequence(1:k))), terms);
+        plan.updates{u} = cell(1, max([plan.recordAfter{u}, 0]));
+        inverse = repmat(base, 1, 1, G);
 
-        for i = 1:numel(terms)
-            members = order(1:terms(i));
-            Xinv = zeros(size(noise));
+        for m = 1:numel(plan.updates{u})
+            j = others(m);
+            update = zeros(numRx, env.Lxu(j), G);
 
             for g = 1:G
-                S = noise(:, :, g);
-
-                for j = members(members ~= u)
-                    S = S + covariances{j}(:, :, g);
-                end
-
-                Xinv(:, :, g) = hermitian(inv(S));
+                B = dominant_factor(covariances{j}(:, :, g), env.Lxu(j));
+                Y = inverse(:, :, g);
+                YB = Y * B;
+                [V, D] = eig(hermitian(eye(env.Lxu(j)) + B' * YB));
+                values = max(real(diag(D)), realmin);
+                update(:, :, g) = YB * (V * diag(values .^ -0.5) * V');
+                inverse(:, :, g) = hermitian(Y - YB * (V * diag(1 ./ values) * V') * YB');
             end
 
-            plan.precoders{u}{i} = Xinv;
+            plan.updates{u}{m} = update;
         end
 
     end
 
     if strcmp(spec.type, 'maxresmac')
-        [state, plan] = update_budgets(state, ctx, plan, noise, covariances, ...
-            order, delta, slot);
+        [state, plan] = update_budgets(state, ctx, plan, repmat(noise, 1, 1, G), ...
+            covariances, order, delta, slot);
     end
 
-    state.learnedRates = plan.rates;
     state.ready = true;
+end
+
+function B = dominant_factor(C, count)
+    %DOMINANT_FACTOR Factor B with B * B' the best rank-count approximation of C
+    [V, D] = eig(hermitian(C));
+    [values, sequence] = sort(max(real(diag(D)), 0), 'descend');
+    B = V(:, sequence(1:count)) * diag(sqrt(values(1:count)));
 end
 
 function marginal = energy_marginals(noise, covariances, order, delta, budget, env)

@@ -1,4 +1,4 @@
-function dci = nr_dci(catalogs, Lxu, NRB)
+function dci = nr_dci(catalogs, Lxu, NRB, dmrsType)
     %NR_DCI Bit-exact transmit-action fields of DCI format 0_1 and their codec
     %
     % Codebook PUSCH carries "Precoding information and number of layers"
@@ -13,6 +13,7 @@ function dci = nr_dci(catalogs, Lxu, NRB)
     %   catalogs: 1-by-U cell of nr_catalog outputs
     %   Lxu: Antenna ports per UE
     %   NRB: Carrier bandwidth in resource blocks
+    %   dmrsType: DMRS configuration type, which sets the antenna-ports width
     %
     % Returns:
     %   dci: Per-UE field widths, the accumulated TPC steps in dB, full DCI 0_1
@@ -20,7 +21,9 @@ function dci = nr_dci(catalogs, Lxu, NRB)
     %     tpc) and msg = dci.decode(u, bits) for the codebook fields
 
     U = numel(catalogs);
-    common = 1 + ceil(log2(NRB * (NRB + 1) / 2)) + 4 + 5 + 1 + 2 + 4 + 1 + 4 + 2 + 1 + 1;
+    antennaPorts = 3 + dmrsType;
+    common = 1 + ceil(log2(NRB * (NRB + 1) / 2)) + 4 + 5 + 1 + 2 + 4 + 1 + antennaPorts + 2 + ...
+        1 + 1;
     dci = struct();
     dci.precoding = cellfun(@(c) c.bits, catalogs);
     dci.tpc = 2 * ones(1, U);

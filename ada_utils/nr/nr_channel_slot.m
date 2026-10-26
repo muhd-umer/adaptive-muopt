@@ -14,8 +14,7 @@ function [H, chan] = nr_channel_slot(chan, env, slot)
 
     carrier = env.carrier;
     carrier.NSlot = slot;
-    numRx = chan.objects{1}.NumReceiveAntennas;
-    H = zeros(numRx, env.Ltot, env.numSubcarriers, env.numSymbols);
+    H = zeros(env.numRx, env.Ltot, env.numSubcarriers, env.numSymbols);
 
     for u = 1:env.U
         % the fading process is a deterministic function of time
