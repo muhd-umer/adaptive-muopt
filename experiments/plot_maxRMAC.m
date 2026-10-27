@@ -83,6 +83,11 @@ function finish(fig, style, file)
     close(fig);
 end
 
+function names = present(stats, names)
+    %PRESENT The listed methods that the saved statistics contain, in order
+    names = names(ismember(names, stats.names));
+end
+
 function colors = class_colors(names, style)
     colors = zeros(numel(names), 3);
 
@@ -163,15 +168,16 @@ function plot_rate_feedback(stats, style, file)
     %PLOT_RATE_FEEDBACK Gap to canonical against the design signaling it costs
     [fig, layout] = new_figure(style, 3.4, 2.9, 1, 1);
     ax = styled_axes(layout, style);
-    learners = {'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', 'ue-pilot-free'};
+    learners = present(stats, {'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', 'ue-pilot-free'});
     markers = containers.Map({'nr', 'covariance', 'reciprocity'}, {'o', 's', '^'});
     oracle = 100 * stats.gaps.canonical.mean(strcmp(stats.names, 'nr-oracle'));
     yline(ax, oracle, '--', 'Color', style.genie, 'LineWidth', 1);
     text(ax, 1.2e2, oracle + 0.55, 'NR oracle, perfect CSI', 'FontName', style.font, ...
         'FontSize', style.size - 1, 'Color', style.secondary);
-    offsets = containers.Map(learners, {[1.2, 0.7], [1.2, -0.55], [0.87, 0.55], ...
-        [1.2, 0.45], [1.2, -0.45]});
-    alignment = containers.Map(learners, {'left', 'left', 'right', 'left', 'left'});
+    offsets = containers.Map({'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', 'ue-pilot-free'}, ...
+        {[1.2, 0.7], [1.2, -0.55], [0.87, 0.55], [1.2, 0.45], [1.2, -0.45]});
+    alignment = containers.Map({'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', 'ue-pilot-free'}, ...
+        {'left', 'left', 'right', 'left', 'left'});
 
     for i = 1:numel(learners)
         m = find(strcmp(stats.names, learners{i}), 1);
@@ -199,7 +205,7 @@ end
 
 function plot_throughput(stats, style, file)
     %PLOT_THROUGHPUT Information rate against realistic link throughput per learner
-    learners = {'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', 'ue-pilot-free'};
+    learners = present(stats, {'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', 'ue-pilot-free'});
     rows = cellfun(@(name) find(strcmp(stats.names, name), 1), learners);
     values = [stats.objective(rows), stats.throughput(rows), stats.netThroughput(rows)];
     errors = [stats.objectiveCI(rows), stats.throughputCI(rows), stats.netThroughputCI(rows)];
@@ -225,7 +231,7 @@ end
 
 function plot_signaling(stats, style, file)
     %PLOT_SIGNALING Design bits and full DCI load per learner
-    learners = {'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', 'ue-pilot-free'};
+    learners = present(stats, {'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', 'ue-pilot-free'});
     rows = cellfun(@(name) find(strcmp(stats.names, name), 1), learners);
     measures = {stats.designRate(rows), stats.controlRate(rows)};
     labels = {'Design signaling (bit/s)', 'DCI payload (bit/s)'};
@@ -277,11 +283,12 @@ end
 
 function plot_traces(stats, cfg, slot, style, outputDir)
     %PLOT_TRACES Weighted rate and cumulative design signaling over time
-    shown = {'canonical', 'nr-oracle', 'nr-pilot', 'cov-pilot', 'ue-pilot'};
+    shown = present(stats, {'canonical', 'nr-oracle', 'nr-pilot', 'cov-pilot', 'ue-pilot'});
     rows = cellfun(@(name) find(strcmp(stats.names, name), 1), shown);
     time = stats.trace.slots * slot * 1e3;
-    dashes = containers.Map(shown, {'-', '--', '-', '-', '-'});
-    tones = containers.Map(shown, {style.ink, style.genie, style.classes.nr, ...
+    known = {'canonical', 'nr-oracle', 'nr-pilot', 'cov-pilot', 'ue-pilot'};
+    dashes = containers.Map(known, {'-', '--', '-', '-', '-'});
+    tones = containers.Map(known, {style.ink, style.genie, style.classes.nr, ...
         style.classes.covariance, style.classes.reciprocity});
     panels = {'objective', 'designBits'};
     names = {'rate_over_time', 'feedback_over_time'};

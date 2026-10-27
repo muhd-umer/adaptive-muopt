@@ -21,8 +21,11 @@ function env = nr_setup(cfg)
 
     U = numel(cfg.Lxu);
 
-    if numel(cfg.theta) ~= U || numel(cfg.userGainDb) ~= U || ~all(ismember(cfg.Lxu, [1 2 4]))
-        error('nr_setup:ues', 'theta and userGainDb need one entry per UE, with 1, 2, or 4 ports');
+    fixedGains = isempty(cfg.userGainDb) || numel(cfg.userGainDb) == U;
+
+    if numel(cfg.theta) ~= U || ~fixedGains || ~all(ismember(cfg.Lxu, [1 2 4]))
+        error('nr_setup:ues', ['theta and a nonempty userGainDb need one entry per UE, ' ...
+            'with 1, 2, or 4 ports']);
     end
 
     if cfg.numRx ~= prod(cfg.gnbArray)
@@ -44,7 +47,6 @@ function env = nr_setup(cfg)
     env.slotDuration = 1e-3 / (cfg.carrier.scs / 15);
     env.tdd = tdd_pattern(cfg, env);
     env.pcap = 10 ^ (cfg.snrDb / 10) * ones(U, 1);
-    env.gain = 10 .^ (cfg.userGainDb(:) / 10);
 
     groupSize = 12 * cfg.prgRB;
     env.numGroups = env.numSubcarriers / groupSize;

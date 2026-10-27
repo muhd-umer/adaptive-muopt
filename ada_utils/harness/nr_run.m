@@ -21,8 +21,8 @@ function result = nr_run(cfg, env, spec, realization)
     %
     % Returns:
     %   result: Per-method rates, energies, objectives, link throughput,
-    %     control bits and messages, and overhead in every uplink slot, and
-    %     the slot numbers of those uplink slots
+    %     control bits and messages, and overhead in every uplink slot, the
+    %     slot numbers of those uplink slots, and the UEs' large-scale gains
 
     rng(cfg.seed + realization);
     chan = nr_channels(cfg, env, cfg.seed + realization);
@@ -49,7 +49,7 @@ function result = nr_run(cfg, env, spec, realization)
     needsCsirs = any(strcmp({methods.kind}, 'reciprocity'));
     needsSrs = any(strcmp({methods.kind}, 'codebook'));
     result = struct('names', {names}, 'spec', spec, 'realization', realization, ...
-        'slots', ctx.slots);
+        'slots', ctx.slots, 'gainDb', chan.gainDb);
     result.metrics = repmat({empty_metrics(U, T)}, 1, M);
 
     for t = 1:T
@@ -167,8 +167,16 @@ function calibration = calibration_errors(cfg, env, realization)
 end
 
 function truth = true_gram(H, env, cfg)
+    %TRUE_GRAM Whitened evaluation-symbol channel and its Grams
+    %
+    % The MAC problem depends on the channel only through its Gram, so Href
+    % is the square factor S * V' of each tone's SVD, which has the same
+    % Gram with min(numRx, Ltot) rows and keeps the canonical solvers out of
+    % the numRx dimension
     channel = pagemldivide(env.noiseFactor, H(:, :, :, cfg.evalSymbol));
-    truth = struct('Href', channel, 'Keval', pagemtimes(channel, 'ctranspose', channel, 'none'));
+    [~, S, V] = pagesvd(channel, 'econ');
+    truth = struct('Href', pagemtimes(S, 'none', V, 'ctranspose'), ...
+        'Keval', pagemtimes(channel, 'ctranspose', channel, 'none'));
     truth.Ksel = truth.Keval(:, :, env.selectSubcarriers);
 end
 

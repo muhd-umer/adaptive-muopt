@@ -157,7 +157,7 @@ function [state, value, eval, counters, moved] = coordinate_step(K, catalogs, st
     end
 
     catalog = catalogs{u};
-    energies = spec.pcap(u) * 10 .^ (list(:, 2) / 10) .* catalog.eta(list(:, 1))';
+    energies = spec.pcap(u) * 10 .^ (list(:, 2) / 10) .* reshape(catalog.eta(list(:, 1)), [], 1);
     others = sum(eval.energy) - eval.energy(u);
     list = list(others + energies <= spec.etotal * (1 + 1e-9), :);
 

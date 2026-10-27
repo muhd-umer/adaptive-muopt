@@ -5,7 +5,8 @@ function chan = nr_channels(cfg, env, seed)
     % interruption, so mobility is the toolbox's Doppler evolution. The CDL
     % profile is set up in downlink terms (gNB transmits) with the UE at a
     % random azimuth inside the sector and a random array orientation, then
-    % swapped to the reciprocal uplink link
+    % swapped to the reciprocal uplink link. An empty userGainDb drops the
+    % UEs over the sector instead and draws their large-scale gains
     %
     % Args:
     %   cfg: Configuration from nr_default_config
@@ -13,13 +14,20 @@ function chan = nr_channels(cfg, env, seed)
     %   seed: Realization seed
     %
     % Returns:
-    %   chan: Channel objects, path filters, and the per-UE amplitude scaling
+    %   chan: Channel objects, path filters, the per-UE large-scale gains in
+    %     dB, and the amplitude scaling they give
 
     U = env.U;
     stream = RandStream('mt19937ar', 'Seed', seed);
     speeds = cfg.channel.speedKmh(:) .* ones(U, 1);
-    chan = struct('objects', {cell(1, U)}, 'filters', {cell(1, U)}, ...
-        'scale', sqrt(env.gain(:)), 'offsets', nan(1, U));
+    gainDb = cfg.userGainDb(:);
+
+    if isempty(gainDb)
+        gainDb = drop_gains(cfg.cell, U, seed);
+    end
+
+    chan = struct('objects', {cell(1, U)}, 'filters', {cell(1, U)}, 'gainDb', gainDb, ...
+        'scale', sqrt(10 .^ (gainDb / 10)), 'offsets', nan(1, U));
 
     for u = 1:U
         cdl = nrCDLChannel;
@@ -44,6 +52,22 @@ function chan = nr_channels(cfg, env, seed)
         chan.filters{u} = getPathFilters(cdl);
     end
 
+end
+
+function gainDb = drop_gains(site, U, seed)
+    %DROP_GAINS Large-scale gains of UEs dropped uniformly over the sector area
+    %
+    % UMa NLOS path loss (TR 38.901 Table 7.4.1-1) with log-normal shadowing,
+    % relative to an unshadowed UE at the median drop distance, so snrDb is
+    % that UE's SNR. The sector is the 120 degree slice of a disc of radius
+    % ISD / sqrt(3) outside the minimum distance
+    stream = RandStream('mt19937ar', 'Seed', seed + 7919);
+    radius = site.isdM / sqrt(3);
+    inner = site.minDistanceM;
+    distance = sqrt(inner ^ 2 + rand(stream, U, 1) * (radius ^ 2 - inner ^ 2));
+    reference = sqrt((inner ^ 2 + radius ^ 2) / 2);
+    loss = @(d) 39.08 * log10(sqrt(d .^ 2 + (site.bsHeightM - site.ueHeightM) ^ 2));
+    gainDb = loss(reference) - loss(distance) + site.shadowingDb * randn(stream, U, 1);
 end
 
 function shape = ue_array(ports)

@@ -5,20 +5,22 @@ function cfg = nr_default_config()
     % receive antenna, so pcap = 10^(snrDb / 10) is the full-power energy a UE
     % spreads over its ports and userGainDb is its large-scale gain. The gNB
     % panel is [rows, columns, polarizations] with numRx = prod(gnbArray)
-    % antennas; Lxu lists each UE's ports (1, 2, or 4), and theta and
-    % userGainDb hold one entry per UE
+    % antennas; Lxu lists each UE's ports, drawn once from the NR uplink
+    % capabilities 1, 2, and 4 within the 12 orthogonal DMRS ports, and
+    % theta and userGainDb hold one entry per UE
     %
     % Returns:
     %   cfg: Configuration struct
 
     cfg = struct();
-    cfg.gnbArray = [4 4 2];
+    cfg.seed = 2026;
+    cfg.gnbArray = [2 2 2];
     cfg.numRx = prod(cfg.gnbArray);
-    cfg.Lxu = [4 2];
-    cfg.theta = [1; 1.5];
+    cfg.Lxu = draw_ports(4, cfg.seed);
+    cfg.theta = [1; 1.25; 1.5; 1.75];
     cfg.cb = 1;
     cfg.snrDb = 5;
-    cfg.userGainDb = [0 -3];
+    cfg.userGainDb = [0 -4 -8 -12];
 
     % DDDSU at 30 kHz is the common 2.5 ms pattern of the 3.5 GHz band;
     % special holds the downlink, guard, and uplink symbols of the S slot
@@ -35,6 +37,11 @@ function cfg = nr_default_config()
         'carrierGHz', 3.5, 'speedKmh', 15, 'sectorDeg', 120, ...
         'angleSpreads', [26 74 5 18]);
     cfg.noise = struct('covariance', []);
+
+    % with an empty userGainDb the UEs are dropped uniformly over a sector of
+    % the TR 38.901 UMa layout in every realization
+    cfg.cell = struct('isdM', 500, 'minDistanceM', 35, 'bsHeightM', 25, 'ueHeightM', 1.5, ...
+        'shadowingDb', 6);
 
     % SRS sits in the uplink symbols of the S slot; UEs share a comb through
     % cyclic shifts so the sounding stays joint. Double-symbol DMRS gives
@@ -69,8 +76,18 @@ function cfg = nr_default_config()
     cfg.horizonSlots = 400;
     cfg.warmupSlots = 100;
     cfg.realizations = 100;
-    cfg.seed = 2026;
     cfg.parallel = true;
     cfg.activity = [];
     cfg.methods = {'canonical', 'nr-oracle', 'nr-csi', 'nr-pilot', 'ue-pilot', 'hold'};
+end
+
+function Lxu = draw_ports(U, seed)
+    stream = RandStream('mt19937ar', 'Seed', seed);
+    capabilities = [1 2 4];
+    Lxu = capabilities(randi(stream, 3, 1, U));
+
+    while sum(Lxu) > 12
+        Lxu = capabilities(randi(stream, 3, 1, U));
+    end
+
 end

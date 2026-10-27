@@ -1,7 +1,8 @@
 %ADA_NRRECIPROCITY How the reciprocity methods degrade with CSI-RS timing, calibration, and mobility
 %
-% The default experiment sends TS 38.211 CSI-RS in the first downlink slot
-% after the uplink DMRS slot of the DDDSU pattern, estimated by the UE with
+% The default experiment sends TS 38.211 CSI-RS in the second downlink slot
+% after the uplink DMRS slot of the DDDSU pattern, the latest that leaves
+% the UE 42 symbols before the next uplink slot, estimated by the UE with
 % nrChannelEstimate and a CSI-IM noise measurement, over chains with a
 % 0.5 dB, 5 degree rms residual calibration error. Each case changes one of
 % those settings: more CSI-RS symbols, a later CSI-RS slot, the calibration
@@ -27,17 +28,18 @@ end
 calibrated = @(db, deg) {'csirs.calibration', struct('amplitudeDb', db, 'phaseDeg', deg)};
 cases = struct('label', {}, 'changes', {});
 cases(end + 1) = struct('label', 'default', 'changes', {{}});
-cases(end + 1) = struct('label', '2 CSI-RS symbols', 'changes', {{'csirs.symbols', 2}});
-cases(end + 1) = struct('label', 'CSI-RS 3 slots after DMRS', 'changes', ...
-    {{'csirs.lagSlots', 3}});
+cases(end + 1) = struct('label', 'CSI-RS 1 slot after DMRS', 'changes', ...
+    {{'csirs.lagSlots', 1}});
+cases(end + 1) = struct('label', 'UE processing 2 slots, CSI-RS 3 after', 'changes', ...
+    {{'csirs.lagSlots', 3, 'csirs.processingSlots', 2}});
 cases(end + 1) = struct('label', 'CSI-RS in S slot', 'changes', {{'csirs.lagSlots', 4}});
 cases(end + 1) = struct('label', 'perfect calibration', 'changes', {calibrated(0, 0)});
 cases(end + 1) = struct('label', 'calibration 1 dB, 10 deg', 'changes', {calibrated(1, 10)});
 cases(end + 1) = struct('label', 'calibration 2 dB, 20 deg', 'changes', {calibrated(2, 20)});
-cases(end + 1) = struct('label', '3 km/h', 'changes', {{'channel.speedKmh', [3 3]}});
-cases(end + 1) = struct('label', '60 km/h', 'changes', {{'channel.speedKmh', [60 60]}});
+cases(end + 1) = struct('label', '3 km/h', 'changes', {{'channel.speedKmh', 3}});
+cases(end + 1) = struct('label', '60 km/h', 'changes', {{'channel.speedKmh', 60}});
 
-spec = struct('type', 'maxrmac', 'theta', [1; 1.5]);
+spec = struct('type', 'maxrmac', 'theta', base.theta);
 fprintf('[maxrmac reciprocity realism, weighted-rate gap to canonical]\n');
 fprintf('%-30s', 'case');
 

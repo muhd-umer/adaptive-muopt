@@ -1,11 +1,11 @@
-%ADA_NRPARETO Performance versus control signaling for the NR-native and covariance modes
+%ADA_NRPARETO Performance versus control signaling for the NR-native and reciprocity modes
 %
 % Sweeps the knobs that trade signaling for performance on maxRMAC and
 % maxRESMAC: the SRS period and the objective-aware trigger of the NR-native
-% pilot policy, the SRS period of the estimated-CSI baseline, the frequency
-% bundling of the compressed-covariance extension, and the CSI-RS symbols
-% and power of the reciprocity-based UE-side solver. SRS periods are whole
-% TDD periods so that every sounding falls in an uplink slot. Every point reports its
+% pilot policy, the SRS period of the estimated-CSI baseline, and the
+% CSI-RS power of the reciprocity-based UE-side solver. SRS periods are
+% whole TDD periods so that every sounding falls in an S slot. Every point
+% reports its
 % gap to the perfect-CSI NR oracle of the same channels, its design-field
 % and full-DCI bit rates, its downlink CSI-RS load, and its SRS-inclusive net
 % throughput
@@ -27,8 +27,8 @@ if strcmp(getenv('ADA_QUICK'), '1')
     base.warmupSlots = 50;
 end
 
-objectives = {struct('type', 'maxrmac', 'theta', [1; 1.5]), ...
-    struct('type', 'maxresmac', 'theta', [1; 1.5], 'sumFraction', 0.75)};
+objectives = {struct('type', 'maxrmac', 'theta', base.theta), ...
+    struct('type', 'maxresmac', 'theta', base.theta, 'sumFraction', 0.75)};
 points = struct('label', {}, 'method', {}, 'changes', {});
 points(end + 1) = struct('label', 'nr-csi srs=5', 'method', 'nr-csi', 'changes', {{'srs.periodSlots', 5}});
 points(end + 1) = struct('label', 'nr-csi srs=10', 'method', 'nr-csi', 'changes', {{'srs.periodSlots', 10}});
@@ -42,16 +42,6 @@ for period = [5 10 20]
             {{'srs.periodSlots', period, 'policy.triggerRelative', trigger}}); %#ok<SAGROW>
     end
 
-end
-
-for bundle = [1 4 12]
-    points(end + 1) = struct('label', sprintf('cov-pilot bundle=%d', bundle), ...
-        'method', 'cov-pilot', 'changes', {{'modeB.bundle', bundle}}); %#ok<SAGROW>
-end
-
-for symbols = [1 2 4]
-    points(end + 1) = struct('label', sprintf('ue-pilot csirs=%d sym', symbols), ...
-        'method', 'ue-pilot', 'changes', {{'csirs.symbols', symbols}}); %#ok<SAGROW>
 end
 
 points(end + 1) = struct('label', 'ue-pilot csirs SNR -10 dB', 'method', 'ue-pilot', ...
@@ -89,9 +79,8 @@ for o = 1:numel(objectives)
     pareto.(spec.type) = frontier;
 end
 
-fprintf('\n  gaps are paired against the perfect-CSI NR oracle of the same channels.\n');
-fprintf('  The covariance points use a custom payload and are a research extension,\n');
-fprintf('  not NR-native signaling; ue-pilot needs TDD reciprocity.\n');
+fprintf('\n  gaps are paired against the perfect-CSI NR oracle of the same channels;\n');
+fprintf('  ue-pilot needs TDD reciprocity.\n');
 
 outputDir = fullfile(root, 'experiments', 'results');
 

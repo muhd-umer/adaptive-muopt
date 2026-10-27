@@ -15,7 +15,7 @@ addpath(genpath(fullfile(root, 'ada_utils')), fullfile(root, 'maxresmac'), ...
     fullfile(root, 'maxrmac'));
 
 cfg = nr_default_config();
-cfg.methods = {'canonical', 'nr-oracle', 'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', ...
+cfg.methods = {'canonical', 'nr-oracle', 'nr-csi', 'nr-pilot', 'ue-pilot', ...
     'ue-pilot-free', 'hold'};
 
 if strcmp(getenv('ADA_QUICK'), '1')
@@ -24,7 +24,7 @@ if strcmp(getenv('ADA_QUICK'), '1')
     cfg.warmupSlots = 50;
 end
 
-spec = struct('type', 'maxrmac', 'theta', [1; 1.5]);
+spec = struct('type', 'maxrmac', 'theta', cfg.theta);
 tstart = tic;
 [results, env] = nr_experiment(cfg, spec);
 fprintf('[maxrmac] %d realizations in %.1f s\n', cfg.realizations, toc(tstart));

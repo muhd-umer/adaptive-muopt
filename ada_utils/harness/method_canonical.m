@@ -15,6 +15,7 @@ end
 function state = init(name, ctx, active)
     state = method_state(name, ctx, active);
     state.split = [];
+    state.splitStep = [];
 end
 
 function [state, record] = step(state, ctx, input, record)
@@ -46,8 +47,9 @@ function [state, record] = step(state, ctx, input, record)
                 etotal = ctx.selection.etotal * T;
 
                 if strcmp(state.name, 'canonical-ue')
-                    [b, E, state.split] = capped_canonical(Href, Lxu, etotal, ...
-                        env.pcap(active) * T, spec.theta(active), state.split);
+                    [b, E, state.split, state.splitStep] = capped_canonical(Href, Lxu, ...
+                        etotal, env.pcap(active) * T, spec.theta(active), state.split, ...
+                        state.splitStep);
                 else
                     [~, E, ~, b] = maxRESMACMIMO(Href, Lxu, etotal, spec.theta(active), 1, true);
                 end
@@ -98,15 +100,20 @@ function [rate, energy] = single_user_waterfill(H, energy)
     energy = sum(level - 1 ./ active) / T;
 end
 
-function [b, E, split] = capped_canonical(H, Lxu, Etotal, caps, theta, split)
+function [b, E, split, step] = capped_canonical(H, Lxu, Etotal, caps, theta, split, step)
     %CAPPED_CANONICAL Shared budget with per-UE caps through a maxRMAC budget split
     %
     % The capped problem equals maxRMAC at the optimal split of the shared
-    % budget, where the energy prices w of the uncapped UEs agree. Two UEs
-    % bisect on w1 - w2; more UEs use projected gradient ascent on the
-    % weighted rate, whose gradient in the budgets is w. Both start from the
-    % last slot's split
+    % budget, where the energy prices w of the uncapped UEs agree. Two UEs find
+    % the root of w1 - w2; more UEs use spectral projected gradient ascent on
+    % the weighted rate, whose gradient in the budgets is w, with
+    % Barzilai-Borwein steps, until a step moves no budget by more than 0.3 *
+    % Etotal / 1024. Both start from the last slot's split and step
     caps = caps(:);
+
+    if numel(split) ~= numel(caps)
+        [split, step] = deal([]);
+    end
 
     if sum(caps) <= Etotal
         [~, E, ~, b] = maxRMACMIMO(H, Lxu, caps, theta, 1, true);
@@ -115,7 +122,7 @@ function [b, E, split] = capped_canonical(H, Lxu, Etotal, caps, theta, split)
     end
 
     if numel(theta) == 2
-        [b, E, split] = bisect_split(H, Lxu, Etotal, caps, theta, split);
+        [b, E, split] = match_prices(H, Lxu, Etotal, caps, theta, split);
         return;
     end
 
@@ -125,16 +132,21 @@ function [b, E, split] = capped_canonical(H, Lxu, Etotal, caps, theta, split)
 
     budgets = fit_split(split * Etotal, caps, Etotal);
     [~, E, w, b] = maxRMACMIMO(H, Lxu, budgets, theta, 1, true);
+    w = w(:);
     value = theta(:)' * sum(b, 2);
-    step = 0.1 * Etotal / max(abs(w(:)));
 
-    for iteration = 1:20
-        direction = fit_split(budgets + step * w(:), caps, Etotal) - budgets;
-        gain = w(:)' * direction;
+    if isempty(step)
+        step = 0.1 * Etotal / max(abs(w));
+    end
 
-        if gain <= 1e-9 * max(abs(value), 1)
+    for iteration = 1:30
+        direction = fit_split(budgets + step * w, caps, Etotal) - budgets;
+
+        if max(abs(direction)) <= 0.3 * Etotal / 1024
             break;
         end
+
+        gain = w' * direction;
 
         for backtrack = 1:6
             trial = budgets + direction;
@@ -153,46 +165,95 @@ function [b, E, split] = capped_canonical(H, Lxu, Etotal, caps, theta, split)
             break;
         end
 
-        [budgets, E, w, b, value] = deal(trial, trialE, trialW, trialB, trialValue);
-        step = 2 * step;
+        move = trial - budgets;
+        curvature = -move' * (trialW(:) - w);
+
+        if curvature > 0
+            step = min(max((move' * move) / curvature, 1e-6 * step), 1e6 * step);
+        else
+            step = 2 * step;
+        end
+
+        [budgets, E, w, b, value] = deal(trial, trialE, trialW(:), trialB, trialValue);
     end
 
     split = budgets / Etotal;
 end
 
-function [b, E, split] = bisect_split(H, Lxu, Etotal, caps, theta, split)
+function [b, E, split] = match_prices(H, Lxu, Etotal, caps, theta, split)
+    %MATCH_PRICES Two-UE budget split where the energy prices agree, by Illinois regula falsi
+    %
+    % The price difference w1 - w2 falls as UE 1's budget grows. A bracket
+    % of width 0.3 * Etotal around the last split is widened to the feasible
+    % range when it misses the root, and the root is resolved to 0.3 *
+    % Etotal / 1024 or until the prices agree
     low = max(0, Etotal - caps(2));
     high = min(caps(1), Etotal);
+    solve = @(x) split_point(H, Lxu, Etotal, theta, x);
 
-    if ~isempty(split)
-        width = 0.15 * Etotal;
-        lowTrial = max(low, split(1) * Etotal - width);
-        highTrial = min(high, split(1) * Etotal + width);
-        [~, ~, wLow] = maxRMACMIMO(H, Lxu, [lowTrial; Etotal - lowTrial], theta, 1, true);
-        [~, ~, wHigh] = maxRMACMIMO(H, Lxu, [highTrial; Etotal - highTrial], theta, 1, true);
+    if isempty(split)
+        guess = 0.5 * (low + high);
+    else
+        guess = min(max(split(1) * Etotal, low), high);
+    end
 
-        if wLow(1) >= wLow(2) && wHigh(1) <= wHigh(2)
-            low = lowTrial;
-            high = highTrial;
+    left = solve(max(low, guess - 0.15 * Etotal));
+    right = solve(min(high, guess + 0.15 * Etotal));
+
+    if left.f < 0 && left.x > low
+        right = left;
+        left = solve(low);
+    elseif right.f > 0 && right.x < high
+        left = right;
+        right = solve(high);
+    end
+
+    if left.f <= 0
+        point = left;
+    elseif right.f >= 0
+        point = right;
+    else
+        [point, side] = deal(left, 0);
+        [fLeft, fRight] = deal(left.f, right.f);
+
+        while right.x - left.x > 0.3 * Etotal / 1024
+            x = right.x - fRight * (right.x - left.x) / (fRight - fLeft);
+            gap = 0.01 * (right.x - left.x);
+            point = solve(min(max(x, left.x + gap), right.x - gap));
+
+            if point.f > 0
+                [left, fLeft] = deal(point, point.f);
+
+                if side == 1
+                    fRight = fRight / 2;
+                end
+
+                side = 1;
+            else
+                [right, fRight] = deal(point, point.f);
+
+                if side == -1
+                    fLeft = fLeft / 2;
+                end
+
+                side = -1;
+            end
+
+            if abs(point.f) <= 1e-6 * max(abs(point.w))
+                break;
+            end
+
         end
 
     end
 
-    for iteration = 1:10
-        middle = 0.5 * (low + high);
-        [~, ~, w] = maxRMACMIMO(H, Lxu, [middle; Etotal - middle], theta, 1, true);
+    [b, E] = deal(point.b, point.E);
+    split = [point.x; Etotal - point.x] / Etotal;
+end
 
-        if w(1) > w(2)
-            low = middle;
-        else
-            high = middle;
-        end
-
-    end
-
-    middle = 0.5 * (low + high);
-    [~, E, ~, b] = maxRMACMIMO(H, Lxu, [middle; Etotal - middle], theta, 1, true);
-    split = [middle; Etotal - middle] / Etotal;
+function point = split_point(H, Lxu, Etotal, theta, x)
+    [~, E, w, b] = maxRMACMIMO(H, Lxu, [x; Etotal - x], theta, 1, true);
+    point = struct('x', x, 'f', w(1) - w(2), 'w', w, 'E', E, 'b', b);
 end
 
 function x = fit_split(x, caps, total)

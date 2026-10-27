@@ -1,4 +1,4 @@
-%ADA_NRABLATION Robustness of the NR maxRMAC methods to SNR, mobility, and colored interference
+%ADA_NRABLATION Ablation of the NR maxRMAC methods to SNR, mobility, UE geometry, and interference
 %
 % Each case changes one physical assumption of the default experiment and
 % reports the paired gap of every method to the perfect-CSI NR oracle on the
@@ -17,7 +17,7 @@ base = nr_default_config();
 base.realizations = 20;
 base.horizonSlots = 300;
 base.warmupSlots = 75;
-base.methods = {'nr-oracle', 'nr-csi', 'nr-pilot', 'cov-pilot', 'ue-pilot', 'hold'};
+base.methods = {'nr-oracle', 'nr-csi', 'nr-pilot', 'ue-pilot', 'hold'};
 
 if strcmp(getenv('ADA_QUICK'), '1')
     base.realizations = 3;
@@ -32,15 +32,17 @@ cases = struct('label', {}, 'changes', {});
 cases(end + 1) = struct('label', 'default', 'changes', {{}});
 cases(end + 1) = struct('label', 'snr 0 dB', 'changes', {{'snrDb', 0}});
 cases(end + 1) = struct('label', 'snr 10 dB', 'changes', {{'snrDb', 10}});
-cases(end + 1) = struct('label', '3 km/h', 'changes', {{'channel.speedKmh', [3 3]}});
-cases(end + 1) = struct('label', '60 km/h', 'changes', {{'channel.speedKmh', [60 60]}});
-cases(end + 1) = struct('label', 'uncorrelated antennas', 'changes', {{'channel.correlation', 'Low'}});
+cases(end + 1) = struct('label', '3 km/h', 'changes', {{'channel.speedKmh', 3}});
+cases(end + 1) = struct('label', '60 km/h', 'changes', {{'channel.speedKmh', 60}});
+cases(end + 1) = struct('label', 'UMa drop per realization', 'changes', {{'userGainDb', []}});
+cases(end + 1) = struct('label', 'narrow angular spread', 'changes', ...
+    {{'channel.angleSpreads', [5 11 3 3]}});
 cases(end + 1) = struct('label', 'colored interference', 'changes', ...
     {{'noise.covariance', interference}});
 cases(end + 1) = struct('label', 'lossy, late control', 'changes', ...
     {{'control.pDrop', 0.05, 'control.pLate', 0.1}});
 
-spec = struct('type', 'maxrmac', 'theta', [1; 1.5]);
+spec = struct('type', 'maxrmac', 'theta', base.theta);
 fprintf('[maxrmac ablation, weighted-rate gap to the NR oracle]\n');
 fprintf('%-24s', 'case');
 

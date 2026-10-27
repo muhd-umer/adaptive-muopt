@@ -17,7 +17,7 @@ addpath(genpath(fullfile(root, 'ada_utils')), fullfile(root, 'maxresmac'), ...
 
 cfg = nr_default_config();
 cfg.methods = {'canonical', 'canonical-ue', 'nr-oracle', 'nr-csi', 'nr-pilot', ...
-    'cov-pilot', 'ue-pilot', 'ue-pilot-free', 'hold'};
+    'ue-pilot', 'ue-pilot-free', 'hold'};
 
 if strcmp(getenv('ADA_QUICK'), '1')
     cfg.realizations = 4;
@@ -25,12 +25,12 @@ if strcmp(getenv('ADA_QUICK'), '1')
     cfg.warmupSlots = 50;
 end
 
-% the capped reference costs a maxRMAC budget-split bisection every slot
+% the capped reference costs a maxRMAC budget-split search every slot
 if strcmp(getenv('ADA_SKIP_CAPPED'), '1')
     cfg.methods = setdiff(cfg.methods, {'canonical-ue'}, 'stable');
 end
 
-spec = struct('type', 'maxresmac', 'theta', [1; 1.5], 'sumFraction', 0.75);
+spec = struct('type', 'maxresmac', 'theta', cfg.theta, 'sumFraction', 0.75);
 tstart = tic;
 [results, env] = nr_experiment(cfg, spec);
 fprintf('[maxresmac] %d realizations in %.1f s\n', cfg.realizations, toc(tstart));
